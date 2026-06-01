@@ -56,6 +56,45 @@ _NORM_FACTOR_FOR_DTYPE = {
 }
 
 
+def _process_ming_images(image_processor: Any, images: Any, **kwargs: Any) -> BatchFeature:
+    return image_processor(images=images, return_tensors="pt", **kwargs)
+
+
+def _process_ming_videos(image_processor: Any, videos: Any, **kwargs: Any) -> BatchFeature:
+    video_processor = getattr(image_processor, "_ming_video_processor", None)
+    if video_processor is None:
+        try:
+            from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
+                Qwen2VLVideoProcessor,
+            )
+
+            if hasattr(image_processor, "to_dict"):
+                video_processor = Qwen2VLVideoProcessor.from_dict(image_processor.to_dict())
+            else:
+                video_processor = Qwen2VLVideoProcessor()
+            try:
+                setattr(image_processor, "_ming_video_processor", video_processor)
+            except Exception:
+                pass
+        except Exception:
+            video_processor = None
+
+    if video_processor is not None:
+        return video_processor(videos=videos, return_tensors="pt", **kwargs)
+
+    video_outputs = image_processor(
+        images=None,
+        videos=videos,
+        return_tensors="pt",
+        **kwargs,
+    )
+    if "pixel_values" in video_outputs:
+        video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
+    if "image_grid_thw" in video_outputs:
+        video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
+    return video_outputs
+
+
 def _normalize_audio_tensor(
     waveform: torch.Tensor,
     sample_rate: int,
@@ -209,10 +248,9 @@ class MingFlashOmniProcessor(ProcessorMixin):
         data: dict[str, Any] = {}
 
         if images is not None:
-            image_outputs = self.image_processor(
-                images=images,
-                videos=None,
-                return_tensors="pt",
+            image_outputs = _process_ming_images(
+                self.image_processor,
+                images,
                 **kwargs.get("images_kwargs", {}),
             )
             data.update(image_outputs)
@@ -220,16 +258,11 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 text = self._expand_image_tokens(text, image_outputs["image_grid_thw"])
 
         if videos is not None:
-            video_outputs = self.image_processor(
-                images=None,
-                videos=videos,
-                return_tensors="pt",
+            video_outputs = _process_ming_videos(
+                self.image_processor,
+                videos,
                 **kwargs.get("videos_kwargs", {}),
             )
-            if "pixel_values" in video_outputs:
-                video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
-            if "image_grid_thw" in video_outputs:
-                video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
             data.update(video_outputs)
             if "video_grid_thw" in video_outputs:
                 text = self._expand_video_tokens(text, video_outputs["video_grid_thw"])

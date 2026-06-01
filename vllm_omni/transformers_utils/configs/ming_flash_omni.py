@@ -339,7 +339,6 @@ class MingFlashOmniTalkerConfig(PretrainedConfig):
         campplus_model: str | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
         self.llm_config = llm_config
         self.flowmodel = flowmodel or {}
         self.aggregator = aggregator or {}
@@ -350,11 +349,13 @@ class MingFlashOmniTalkerConfig(PretrainedConfig):
         self.cfg_strength = cfg_strength
         self.audio_vae_path = audio_vae_path
         self.campplus_model = campplus_model
+        super().__init__(**kwargs)
 
     def get_text_config(self, decoder: bool = False) -> PretrainedConfig:  # noqa: ARG002
-        if isinstance(self.llm_config, dict):
-            return PretrainedConfig.from_dict(self.llm_config)
-        return self.llm_config
+        llm_config = getattr(self, "llm_config", None)
+        if isinstance(llm_config, dict):
+            return PretrainedConfig.from_dict(llm_config)
+        return llm_config or PretrainedConfig()
 
 
 class MingFlashOmniConfig(PretrainedConfig):
@@ -375,8 +376,6 @@ class MingFlashOmniConfig(PretrainedConfig):
         talker_config: MingFlashOmniTalkerConfig | dict[str, Any] | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
         if isinstance(thinker_config, dict):
             self.thinker_config = BailingMM2Config(**thinker_config)
         else:
@@ -395,9 +394,13 @@ class MingFlashOmniConfig(PretrainedConfig):
             self.talker_config = MingFlashOmniTalkerConfig(**talker_config)
         else:
             self.talker_config = talker_config
+        super().__init__(**kwargs)
 
     def get_text_config(self, decoder: bool = False) -> PretrainedConfig:  # noqa: ARG002
-        return self.thinker_config.get_text_config()
+        thinker_config = getattr(self, "thinker_config", None)
+        if thinker_config is None:
+            return PretrainedConfig()
+        return thinker_config.get_text_config()
 
 
 # Register model_type -> config class for AutoConfig

@@ -1092,6 +1092,18 @@ class TestDeployConfigLoading:
         assert deploy.stages[0].compilation_config == {"pass_config": {"fuse_allreduce_rms": False}}
         assert "compilation_config" not in deploy.stages[0].engine_extras
 
+    def test_ming_flash_omni_talker_config_validates_with_llm_config(self):
+        from vllm_omni.transformers_utils.configs.ming_flash_omni import (
+            MingFlashOmniConfig,
+            MingFlashOmniTalkerConfig,
+        )
+
+        talker = MingFlashOmniTalkerConfig(llm_config={"model_type": "qwen2", "vocab_size": 42})
+        assert talker.get_text_config().vocab_size == 42
+
+        root = MingFlashOmniConfig(talker_config={"llm_config": {"model_type": "qwen2", "vocab_size": 43}})
+        assert root.talker_config.get_text_config().vocab_size == 43
+
     def test_merge_pipeline_deploy(self):
         pipeline = _PIPELINE_REGISTRY["qwen3_omni_moe"]
         deploy_path = Path(__file__).parent.parent / "vllm_omni" / "deploy" / "qwen3_omni_moe.yaml"
@@ -1891,13 +1903,7 @@ class TestSentinelDefaultPrecedence:
         )
 
     def test_ming_flash_omni_topology(self):
-        """Guard ming_flash_omni's PR3 cleanup: stage 0 has no full-payload
-        producer hook (the connector path was removed as fake -- arch is not
-        in ``_FULL_PAYLOAD_INPUT_STAGES``), and stage 1 still wires the
-        legacy ``thinker2talker`` (custom_process_input_func) plus the
-        ``thinker2talker_token_only`` placeholder (sync_process_input_func).
-        Merge under either async_chunk mode must not re-introduce a
-        stage-0 full-payload hook."""
+        """Guard Ming's split async/sync thinker -> talker bridge."""
         from vllm_omni.config.stage_config import DeployConfig, merge_pipeline_deploy
 
         pipeline = _PIPELINE_REGISTRY["ming_flash_omni"]
@@ -1907,19 +1913,20 @@ class TestSentinelDefaultPrecedence:
             "ming_flash_omni stage 0 must not declare a full-payload producer "
             "(connector path is not active for this arch)."
         )
+        assert stage0.async_chunk_process_next_stage_input_func is not None
+        assert stage0.async_chunk_process_next_stage_input_func.endswith("thinker2talker_async_chunk")
         assert stage1.custom_process_input_func is not None
         assert stage1.custom_process_input_func.endswith("thinker2talker")
         assert stage1.sync_process_input_func is not None
         assert stage1.sync_process_input_func.endswith("thinker2talker_token_only")
 
-        # async_chunk=True must now be rejected: removing the fake hook means
-        # there is no next-stage input processor for the validator to accept.
-        # (Positive consequence -- users can't accidentally enable async_chunk
-        # on an arch that doesn't actually support it.)
-        import pytest as _pytest
-
-        with _pytest.raises(ValueError, match="async_chunk=True"):
-            merge_pipeline_deploy(pipeline, DeployConfig(async_chunk=True))
+        async_merged = merge_pipeline_deploy(pipeline, DeployConfig(async_chunk=True))
+        assert (
+            async_merged[0]
+            .yaml_engine_args["custom_process_next_stage_input_func"]
+            .endswith("thinker2talker_async_chunk")
+        )
+        assert async_merged[1].custom_process_input_func.endswith("thinker2talker")
 
         # async_chunk=False merges cleanly and stage-0 yaml_engine_args carries
         # no spurious full-payload hook.

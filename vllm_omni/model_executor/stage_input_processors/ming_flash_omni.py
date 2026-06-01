@@ -24,6 +24,9 @@ CFG_TEXT_SUFFIX = "__cfg_text"
 # llm_config.image_patch_token on the released Ming-flash-omni-2.0 checkpoint.
 _DEFAULT_IMAGE_PATCH_TOKEN_ID = 157157
 
+_TEXT_BOUNDARY_CHARS = set("。！？.!?\n")
+_TEXT_SOFT_BOUNDARY_CHARS = set("，,；;：:")
+
 
 # Ming's byte5 glyph text is auto-extracted from the user prompt's quoted
 # spans (ASCII double quotes / Chinese curly quotes). Patterns and regex
@@ -217,15 +220,66 @@ def _validate_stage_inputs(stage_list, engine_input_source):
     return stage, stage.engine_outputs
 
 
+def _extract_prompt_additional_info(prompt: Any) -> dict[str, Any]:
+    if prompt is not None and hasattr(prompt, "additional_information"):
+        return getattr(prompt, "additional_information") or {}
+    if isinstance(prompt, dict):
+        return prompt.get("additional_information") or {}
+    return {}
+
+
+def _normalize_spk_emb(spk_emb: Any) -> Any:
+    # spk_emb can arrive serialized as a plain list from JSON requests; the
+    # talker's spk_head wants a torch tensor.
+    if isinstance(spk_emb, list) and spk_emb and not hasattr(spk_emb[0], "device"):
+        return torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
+    return spk_emb
+
+
+def _build_talker_info(
+    generated_text: str,
+    additional_info: dict[str, Any] | None,
+    *,
+    chunk_index: int | None = None,
+    is_last_chunk: bool | None = None,
+) -> dict[str, Any]:
+    additional_info = additional_info or {}
+    talker_info: dict[str, Any] = {
+        "ming_task": "omni",
+        "text": generated_text,
+        "spk_emb": _normalize_spk_emb(additional_info.get("spk_emb", None)),
+        "voice_name": additional_info.get("voice_name", "DB30"),
+        "prompt_text": additional_info.get("prompt_text", None),
+        "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
+        "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
+        "max_text_length": additional_info.get("max_text_length", 50),
+    }
+    for key in ("stream_decode", "use_static_cache"):
+        if key in additional_info:
+            talker_info[key] = additional_info[key]
+    if chunk_index is not None:
+        talker_info["chunk_index"] = chunk_index
+    if is_last_chunk is not None:
+        talker_info["is_last_chunk"] = is_last_chunk
+    return talker_info
+
+
 def _ensure_list(x) -> list[int]:
     """Convert ConstantList / tensor-like to plain list."""
+    if x is None:
+        return []
     if hasattr(x, "_x"):
         return list(x._x)
     if isinstance(x, list):
         return x
+    if isinstance(x, tuple):
+        return list(x)
     if hasattr(x, "tolist"):
         return x.tolist()
-    return list(x)
+    try:
+        return list(x)
+    except TypeError:
+        return []
 
 
 def _slice_patch_hidden(
@@ -458,6 +512,259 @@ def thinker2imagegen(
     return [{"prompt": "", "extra": extra}]
 
 
+def _request_id(request: Any) -> str:
+    return str(
+        getattr(request, "external_req_id", None)
+        or getattr(request, "request_id", None)
+        or getattr(request, "req_id", "")
+    )
+
+
+def _extract_generated_token_ids(request: Any) -> list[int]:
+    output_token_ids = _ensure_list(getattr(request, "output_token_ids", None))
+    if output_token_ids:
+        return [int(t) for t in output_token_ids if int(t) >= 0]
+
+    all_token_ids = _ensure_list(getattr(request, "all_token_ids", None))
+    prompt_token_ids = _ensure_list(getattr(request, "prompt_token_ids", None))
+    if len(all_token_ids) > len(prompt_token_ids):
+        return [int(t) for t in all_token_ids[len(prompt_token_ids) :] if int(t) >= 0]
+    return []
+
+
+def _get_text_tokenizer(transfer_manager: Any) -> Any | None:
+    tokenizer = getattr(transfer_manager, "tokenizer", None)
+    if tokenizer is not None:
+        return tokenizer
+
+    tokenizer = getattr(getattr(transfer_manager, "model", None), "tokenizer", None)
+    if tokenizer is not None:
+        setattr(transfer_manager, "tokenizer", tokenizer)
+        return tokenizer
+
+    tokenizer = getattr(transfer_manager, "_ming_text_tokenizer", None)
+    if tokenizer is not None:
+        return tokenizer
+
+    model_config = getattr(transfer_manager, "model_config", None)
+    model_path = getattr(model_config, "model", None)
+    if not model_path:
+        return None
+
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=bool(getattr(model_config, "trust_remote_code", True)),
+        )
+        setattr(transfer_manager, "_ming_text_tokenizer", tokenizer)
+        return tokenizer
+    except Exception:
+        logger.debug(
+            "Ming async chunk failed to lazy-load thinker tokenizer from %s",
+            model_path,
+            exc_info=True,
+        )
+        return None
+
+
+def _decode_generated_text(transfer_manager: Any, request: Any) -> str:
+    for attr in ("text", "output_text", "generated_text"):
+        value = getattr(request, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    token_ids = _extract_generated_token_ids(request)
+    if not token_ids:
+        return ""
+
+    tokenizer = _get_text_tokenizer(transfer_manager)
+    if tokenizer is None:
+        logger.debug("Ming async chunk cannot decode request text: tokenizer unavailable")
+        return ""
+
+    try:
+        return tokenizer.decode(token_ids, skip_special_tokens=True)
+    except TypeError:
+        return tokenizer.decode(token_ids)
+    except Exception:
+        logger.debug("Ming async chunk failed to decode generated token ids", exc_info=True)
+        return ""
+
+
+def _semantic_units(text: str) -> int:
+    try:
+        from vllm_omni.model_executor.models.ming_flash_omni.text_processing import (
+            get_semantic_length,
+        )
+
+        return int(get_semantic_length(text))
+    except Exception:
+        return len(text)
+
+
+def _find_text_chunk_boundary(text: str, *, min_units: int, max_units: int, force: bool) -> int:
+    if not text:
+        return 0
+    if force:
+        return len(text)
+
+    best_overflow = 0
+    overflow_units = 0
+    for index, ch in enumerate(text, start=1):
+        units = _semantic_units(text[:index])
+        if units < min_units:
+            continue
+        if ch in _TEXT_BOUNDARY_CHARS:
+            return index
+        if units >= max_units:
+            if ch in _TEXT_SOFT_BOUNDARY_CHARS:
+                return index
+            if best_overflow == 0:
+                best_overflow = index
+                overflow_units = units
+            elif units - overflow_units >= 8:
+                break
+
+    if best_overflow:
+        return best_overflow
+    return 0
+
+
+def _get_ming_async_text_state(transfer_manager: Any) -> dict[str, dict[str, Any]]:
+    state = getattr(transfer_manager, "ming_text_chunk_state", None)
+    if state is None:
+        state = {}
+        setattr(transfer_manager, "ming_text_chunk_state", state)
+    return state
+
+
+def _extract_request_additional_info(request: Any) -> dict[str, Any]:
+    info = getattr(request, "additional_information", None)
+    if isinstance(info, dict):
+        return info
+    try:
+        from vllm_omni.engine.serialization import deserialize_additional_information
+
+        return deserialize_additional_information(info)
+    except Exception:
+        logger.debug(
+            "Ming async chunk failed to deserialize request additional_information",
+            exc_info=True,
+        )
+        return {}
+
+
+def _read_int_config(transfer_manager: Any, key: str, default: int) -> int:
+    connector = getattr(transfer_manager, "connector", None) or getattr(transfer_manager, "_omni_connector", None)
+    raw_cfg = getattr(connector, "config", {}) or {}
+    cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
+    try:
+        return int(cfg.get(key, default)) if isinstance(cfg, dict) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _empty_terminal_chunk() -> dict[str, Any]:
+    return {
+        "codes": {"audio": [0]},
+        "next_stage_prompt_len": 1,
+        "text": "",
+        "is_empty_terminal_chunk": True,
+        "meta": {
+            "finished": torch.tensor(True, dtype=torch.bool),
+            "override_keys": [("codes", "audio")],
+        },
+    }
+
+
+def thinker2talker_async_chunk(
+    transfer_manager: Any,
+    pooling_output: dict[str, Any] | None,
+    request: Any,
+    is_finished: bool = False,
+) -> dict[str, Any] | None:
+    """Build incremental Ming talker inputs from thinker text generation.
+
+    Ming's stage boundary is text-based, so the async payload carries a text
+    chunk in ``additional_information`` and a single dummy generation token to
+    wake the downstream generation scheduler.
+    """
+    del pooling_output
+
+    request_id = _request_id(request)
+    if not request_id:
+        return None
+
+    finished = bool(is_finished or getattr(request, "is_finished", lambda: False)())
+    full_text = _decode_generated_text(transfer_manager, request)
+    states = _get_ming_async_text_state(transfer_manager)
+    state = states.setdefault(
+        request_id,
+        {
+            "emitted_chars": 0,
+            "chunk_index": 0,
+            "additional_info": _extract_request_additional_info(request),
+        },
+    )
+
+    emitted_chars = int(state.get("emitted_chars", 0))
+    if emitted_chars > len(full_text):
+        emitted_chars = 0
+    pending_text = full_text[emitted_chars:]
+
+    initial_min_units = _read_int_config(transfer_manager, "ming_text_initial_min_units", 8)
+    chunk_min_units = _read_int_config(transfer_manager, "ming_text_chunk_min_units", 16)
+    chunk_max_units = _read_int_config(transfer_manager, "ming_text_chunk_max_units", 40)
+    chunk_index = int(state.get("chunk_index", 0))
+    min_units = initial_min_units if chunk_index == 0 else chunk_min_units
+    boundary = _find_text_chunk_boundary(
+        pending_text,
+        min_units=max(1, min_units),
+        max_units=max(max(1, chunk_max_units), max(1, min_units)),
+        force=finished,
+    )
+
+    if boundary <= 0:
+        if finished and request_id in states:
+            states.pop(request_id, None)
+            return _empty_terminal_chunk()
+        return None
+
+    chunk_text = pending_text[:boundary].strip()
+    if not chunk_text:
+        state["emitted_chars"] = emitted_chars + boundary
+        if finished:
+            states.pop(request_id, None)
+            return _empty_terminal_chunk()
+        return None
+
+    is_last_chunk = finished and not full_text[emitted_chars + boundary :].strip()
+    state["emitted_chars"] = emitted_chars + boundary
+    state["chunk_index"] = chunk_index + 1
+    if is_last_chunk:
+        states.pop(request_id, None)
+
+    talker_info = _build_talker_info(
+        chunk_text,
+        state.get("additional_info") or _extract_request_additional_info(request),
+        chunk_index=chunk_index,
+        is_last_chunk=is_last_chunk,
+    )
+    return {
+        # Generation scheduler uses prompt_token_ids as the unit of work. Ming
+        # talker ignores the token value and reads the text from runtime info.
+        "codes": {"audio": [0]},
+        "next_stage_prompt_len": 1,
+        **talker_info,
+        "meta": {
+            "finished": torch.tensor(is_last_chunk, dtype=torch.bool),
+            "override_keys": [("codes", "audio")],
+        },
+    }
+
+
 def thinker2talker(
     stage_list: list[Any],
     engine_input_source: list[int],
@@ -484,17 +791,7 @@ def thinker2talker(
 
         # Extract additional information from the original prompt
         original_prompt = prompt[i] if i < len(prompt) else None
-        additional_info = {}
-        if original_prompt is not None and hasattr(original_prompt, "additional_information"):
-            additional_info = original_prompt.additional_information or {}
-
-        # spk_emb can arrive serialised as a plain list from JSON requests;
-        # the talker's spk_head wants a torch tensor.
-        spk_emb = additional_info.get("spk_emb", None)
-        if isinstance(spk_emb, list) and spk_emb and not hasattr(spk_emb[0], "device"):
-            import torch
-
-            spk_emb = torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
+        additional_info = _extract_prompt_additional_info(original_prompt)
 
         # Omni speech path mirrors upstream `omni_audio_generation`:
         # - `prompt` is hardcoded, `instruction` is forced to None,
@@ -511,16 +808,7 @@ def thinker2talker(
         # `ming_task="omni"` so any stray caller overrides are ignored.
         # Voice presets are resolved by voice_name in the talker's
         # forward() from its registered_prompts cache.
-        talker_info = {
-            "ming_task": "omni",
-            "text": generated_text,
-            "spk_emb": spk_emb,
-            "voice_name": additional_info.get("voice_name", "DB30"),
-            "prompt_text": additional_info.get("prompt_text", None),
-            "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
-            "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
-            "max_text_length": additional_info.get("max_text_length", 50),
-        }
+        talker_info = _build_talker_info(generated_text, additional_info)
 
         # Use dummy token IDs (talker builds its own embeddings from text)
         talker_inputs.append(
@@ -535,13 +823,10 @@ def thinker2talker(
     return talker_inputs
 
 
-# ming_flash_omni is not in ``_OMNI_CONNECTOR_INIT_ARCHS`` or
-# ``_FULL_PAYLOAD_INPUT_STAGES``, so the worker connector is not
-# initialised for this arch and the consumer never waits on a connector
-# payload.  Data flows through ``additional_information`` written by
-# ``thinker2talker_token_only`` (wired as ``sync_process_input_func``
-# in the pipeline) or the legacy ``thinker2talker`` (wired as
-# ``custom_process_input_func``).
+# The sync path still flows through ``additional_information`` written by
+# ``thinker2talker_token_only`` (wired as ``sync_process_input_func`` in the
+# pipeline). The async path uses ``thinker2talker_async_chunk`` and shared
+# memory to stream text chunks from thinker to talker.
 
 
 def thinker2talker_token_only(
@@ -567,26 +852,8 @@ def thinker2talker_token_only(
         generated_text = output.text if hasattr(output, "text") and output.text else ""
 
         original_prompt = prompt[i] if i < len(prompt) else None
-        additional_info: dict[str, Any] = {}
-        if original_prompt is not None and hasattr(original_prompt, "additional_information"):
-            additional_info = original_prompt.additional_information or {}
-
-        spk_emb = additional_info.get("spk_emb", None)
-        if isinstance(spk_emb, list) and spk_emb and not hasattr(spk_emb[0], "device"):
-            import torch
-
-            spk_emb = torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
-
-        talker_info = {
-            "ming_task": "omni",
-            "text": generated_text,
-            "spk_emb": spk_emb,
-            "voice_name": additional_info.get("voice_name", "DB30"),
-            "prompt_text": additional_info.get("prompt_text", None),
-            "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
-            "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
-            "max_text_length": additional_info.get("max_text_length", 50),
-        }
+        additional_info = _extract_prompt_additional_info(original_prompt)
+        talker_info = _build_talker_info(generated_text, additional_info)
 
         talker_inputs.append(
             OmniTokensPrompt(
@@ -613,9 +880,8 @@ def thinker2talker_full_payload(
     ming_flash_omni's thinker emits no heavy tensor to ship via the
     worker connector (the bridge passes text only, and speaker metadata
     arrives through the USER request's additional_information).
-    ming_flash_omni is not in ``_OMNI_CONNECTOR_INIT_ARCHS`` so this
-    function is never invoked at runtime; it is retained for forward
-    compatibility with the connector path.
+    This function is retained for the sync/full-payload interface shape, but
+    Ming's active streaming path uses ``thinker2talker_async_chunk`` instead.
     """
     del transfer_manager, pooling_output, request
     return None
@@ -626,6 +892,7 @@ __all__ = [
     "expand_cfg_prompts",
     "thinker2imagegen",
     "thinker2talker",
+    "thinker2talker_async_chunk",
     "thinker2talker_full_payload",
     "thinker2talker_token_only",
 ]

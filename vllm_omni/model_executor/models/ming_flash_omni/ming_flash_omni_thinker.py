@@ -82,6 +82,54 @@ from .vision_encoder import MingVisionEncoder
 logger = init_logger(__name__)
 
 
+def _process_ming_images(image_processor: Any, images: object, **kwargs: object) -> BatchFeature:
+    return image_processor(
+        images=images,
+        return_tensors="pt",
+        **kwargs,
+    )
+
+
+def _process_ming_videos(image_processor: Any, videos: object, **kwargs: object) -> BatchFeature:
+    """Process videos across transformers versions."""
+    video_processor = getattr(image_processor, "_ming_video_processor", None)
+    if video_processor is None:
+        try:
+            from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
+                Qwen2VLVideoProcessor,
+            )
+
+            if hasattr(image_processor, "to_dict"):
+                video_processor = Qwen2VLVideoProcessor.from_dict(image_processor.to_dict())
+            else:
+                video_processor = Qwen2VLVideoProcessor()
+            try:
+                setattr(image_processor, "_ming_video_processor", video_processor)
+            except Exception:
+                pass
+        except Exception:
+            video_processor = None
+
+    if video_processor is not None:
+        return video_processor(
+            videos=videos,
+            return_tensors="pt",
+            **kwargs,
+        )
+
+    video_outputs = image_processor(
+        images=None,
+        videos=videos,
+        return_tensors="pt",
+        **kwargs,
+    )
+    if "pixel_values" in video_outputs:
+        video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
+    if "image_grid_thw" in video_outputs:
+        video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
+    return video_outputs
+
+
 class MingAudioInput(TensorSchema):
     """
     Dimensions:
@@ -538,27 +586,12 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         images = mm_data.get("images", None)
         if images is not None:
-            image_outputs = hf_processor.image_processor(
-                images=images,
-                videos=None,
-                return_tensors="pt",
-            )
+            image_outputs = _process_ming_images(hf_processor.image_processor, images)
             data.update(image_outputs)
 
         videos = mm_data.get("videos", None)
         if videos is not None:
-            # TODO: ``videos=`` on image_processor is deprecated since
-            # transformers v4.57 (removed in v5); migrate to Qwen2VLVideoProcessor.
-            video_outputs = hf_processor.image_processor(
-                images=None,
-                videos=videos,
-                return_tensors="pt",
-            )
-            # Rename keys to distinguish from images
-            if "pixel_values" in video_outputs:
-                video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
-            if "image_grid_thw" in video_outputs:
-                video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
+            video_outputs = _process_ming_videos(hf_processor.image_processor, videos)
             data.update(video_outputs)
 
         audios = mm_data.get("audios", None)

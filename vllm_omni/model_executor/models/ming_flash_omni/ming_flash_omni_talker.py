@@ -310,6 +310,9 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         The full autoregressive generation loop is executed inside this method.
         """
         additional_info = self._extract_additional_info(runtime_additional_information)
+        if additional_info.get("is_empty_terminal_chunk"):
+            return OmniOutput(text_hidden_states=None, multimodal_outputs={})
+
         params = self._resolve_generation_params(additional_info)
         voice = self._resolve_voice(additional_info)
 

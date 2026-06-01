@@ -888,6 +888,98 @@ def test_ming_flash_omni_thinker2talker_token_only_smoke() -> None:
     assert info["ming_task"] == "omni"
 
 
+def test_ming_flash_omni_async_chunk_emits_sentence_boundary() -> None:
+    """Ming async chunk streams text chunks with request voice metadata."""
+    from vllm_omni.model_executor.stage_input_processors.ming_flash_omni import (
+        thinker2talker_async_chunk,
+    )
+
+    class _Connector:
+        config = {
+            "extra": {
+                "ming_text_initial_min_units": 2,
+                "ming_text_chunk_min_units": 2,
+                "ming_text_chunk_max_units": 10,
+            }
+        }
+
+    transfer_manager = SimpleNamespace(connector=_Connector())
+    request = SimpleNamespace(
+        request_id="ming-r1",
+        text="hello world. trailing",
+        additional_information={"voice_name": "ZH_FEMALE"},
+    )
+
+    payload = thinker2talker_async_chunk(transfer_manager, None, request, is_finished=False)
+
+    assert payload is not None
+    assert payload["codes"]["audio"] == [0]
+    assert payload["next_stage_prompt_len"] == 1
+    assert payload["text"] == "hello world."
+    assert payload["voice_name"] == "ZH_FEMALE"
+    assert payload["chunk_index"] == 0
+    assert payload["is_last_chunk"] is False
+    assert payload["meta"]["finished"].item() is False
+
+
+def test_ming_flash_omni_async_chunk_emits_terminal_empty_chunk() -> None:
+    from vllm_omni.model_executor.stage_input_processors.ming_flash_omni import (
+        thinker2talker_async_chunk,
+    )
+
+    transfer_manager = SimpleNamespace(connector=SimpleNamespace(config={}))
+    request = SimpleNamespace(request_id="ming-r2", text="", additional_information={})
+
+    payload = thinker2talker_async_chunk(transfer_manager, None, request, is_finished=True)
+
+    assert payload is not None
+    assert payload["is_empty_terminal_chunk"] is True
+    assert payload["text"] == ""
+    assert payload["meta"]["finished"].item() is True
+
+
+def test_ming_flash_omni_async_chunk_adapter_accepts_dict_payload() -> None:
+    """Legacy chunk adapter must accept Ming's text-carrying dict payload."""
+    from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
+        OmniChunkTransferAdapter,
+    )
+
+    class _Connector:
+        stage_id = 0
+
+        def __init__(self):
+            self.put_calls = []
+
+        def put(self, **kwargs):
+            self.put_calls.append(kwargs)
+            return True, 1, {}
+
+    connector = _Connector()
+    adapter = object.__new__(OmniChunkTransferAdapter)
+    adapter.connector = connector
+    adapter.put_req_chunk = {}
+    adapter.request_payload = {}
+    adapter.code_prompt_token_ids = {}
+    adapter.requests_num_chunks_sent = {}
+    adapter.custom_process_next_stage_input_func = lambda **_kwargs: {
+        "codes": {"audio": [0]},
+        "text": "hello",
+        "meta": {"finished": torch.tensor(False, dtype=torch.bool)},
+    }
+
+    request = SimpleNamespace(external_req_id="ext-r1", request_id="int-r1")
+    adapter._send_single_request(
+        {
+            "pooling_output": None,
+            "request": request,
+            "is_finished": False,
+        }
+    )
+
+    assert adapter.put_req_chunk["ext-r1"] == 1
+    assert connector.put_calls[0]["data"]["text"] == "hello"
+
+
 def test_qwen2_5_omni_thinker2talker_token_only_smoke() -> None:
     """Smoke: qwen2_5_omni thinker token-only allocates prompt slots; bulk payload ships via connector."""
     from vllm_omni.model_executor.stage_input_processors.qwen2_5_omni import (

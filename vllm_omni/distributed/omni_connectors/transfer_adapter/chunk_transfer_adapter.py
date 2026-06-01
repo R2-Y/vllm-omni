@@ -286,7 +286,11 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             # That asymmetry is intentional: `OmniMsgpackDecoder` is type-erased
             # (no target type), so the wire round-trips struct -> dict. If you
             # change the schema, update both ends — see test_wire_round_trip.
-            finished_flag = payload_data.meta.finished if payload_data.meta is not None else None
+            if isinstance(payload_data, dict):
+                meta = payload_data.get("meta")
+                finished_flag = meta.get("finished") if isinstance(meta, dict) else None
+            else:
+                finished_flag = payload_data.meta.finished if payload_data.meta is not None else None
             is_payload_finished = False
             if isinstance(finished_flag, torch.Tensor):
                 is_payload_finished = finished_flag.numel() == 1 and bool(finished_flag.item())

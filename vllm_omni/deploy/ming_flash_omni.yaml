@@ -14,7 +14,17 @@
 #   * Stage 1 (talker) colocates on GPU 3 with gpu_memory_utilization=0.18.
 #     This custom settings is verified and required on devices with 80GB memory.
 pipeline: ming_flash_omni
-async_chunk: false
+async_chunk: true
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      ming_text_initial_min_units: 8
+      ming_text_chunk_min_units: 16
+      ming_text_chunk_max_units: 40
 
 trust_remote_code: true
 distributed_executor_backend: mp
@@ -23,11 +33,13 @@ enable_prefix_caching: false
 stages:
   - stage_id: 0
     max_num_seqs: 1
-    gpu_memory_utilization: 0.74
+    gpu_memory_utilization: 0.8
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
     enforce_eager: false
     tensor_parallel_size: 4
     max_num_batched_tokens: 32768
-    devices: "0,1,2,3"
+    devices: "4,5,6,7"
     # disable fused allreduce+rms for flashinfer version mismatch for now
     compilation_config:
       pass_config:
@@ -43,9 +55,11 @@ stages:
   - stage_id: 1
     max_num_seqs: 1
     gpu_memory_utilization: 0.18
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
     enforce_eager: true
     max_num_batched_tokens: 1000000
-    devices: "3"
+    devices: "7"
     default_sampling_params:
       temperature: 0.0
       max_tokens: 1
