@@ -433,6 +433,44 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin):
                 get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Final async-chunk terminal flush for requests the scheduler is about
+        # to clean up this step. They are still in ``self.requests`` (will be
+        # popped inside ``_update_states`` below). Emit one last chunk with
+        # ``is_finished=True`` so the consumer side gets a ``meta.finished``
+        # terminal payload (drives ``_chunk_finished_req_ids``).
+        if (
+            getattr(self, "_async_chunk", False)
+            and getattr(self, "_custom_process_func", None) is not None
+            and scheduler_output.finished_req_ids
+        ):
+            for rid in scheduler_output.finished_req_ids:
+                req_state = self.requests.get(rid)
+                if req_state is None:
+                    continue
+                _had_attr = hasattr(req_state, "is_finished")
+                _orig = getattr(req_state, "is_finished", None) if _had_attr else None
+                try:
+                    req_state.is_finished = (lambda: True)
+                    self.send_chunk(req_state, pooling_output=None)
+                except Exception:
+                    logger.exception(
+                        "[Stage-%s] async_chunk terminal send_chunk failed for req=%s",
+                        getattr(self, "_stage_id", -1),
+                        rid,
+                    )
+                finally:
+                    if _had_attr:
+                        try:
+                            req_state.is_finished = _orig  # type: ignore[assignment]
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            delattr(req_state, "is_finished")
+                        except Exception:
+                            pass
+
         with (
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
             self.synchronize_input_prep(),
@@ -1103,6 +1141,51 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin):
                 req_state = self.requests.get(rid)
                 if req_state is not None and pooler_output[i]:
                     self.accumulate_full_payload_output(rid, pooler_output[i], req_state)
+
+        # Async-chunk producer hook (e.g. Ming thinker -> talker text streaming).
+        # When the stage declares an ``async_chunk_process_next_stage_input_func``
+        # in its pipeline config and the deploy config sets ``async_chunk: true``,
+        # the mixin loads it as ``self._custom_process_func`` and sets
+        # ``self._async_chunk = True``. The hook is expected to be polled every
+        # decode step so it can emit incremental text/code chunks downstream as
+        # soon as a chunk boundary is reached.
+        # Worker-side ``CachedRequestState`` lacks ``is_finished()``;
+        # surface the current-step finished signal via a temporary callable
+        # derived from ``scheduler_output.finished_req_ids`` so the hook can
+        # emit the terminal chunk that drives ``_chunk_finished_req_ids`` on
+        # the consumer side.
+        if (
+            getattr(self, "_async_chunk", False)
+            and getattr(self, "_custom_process_func", None) is not None
+        ):
+            finished_now = set(getattr(scheduler_output, "finished_req_ids", None) or [])
+            for rid in req_ids_output_copy:
+                req_state = self.requests.get(rid)
+                if req_state is None:
+                    continue
+                _fin_flag = rid in finished_now
+                _had_attr = hasattr(req_state, "is_finished")
+                _orig = getattr(req_state, "is_finished", None) if _had_attr else None
+                try:
+                    req_state.is_finished = (lambda _f=_fin_flag: _f)
+                    self.send_chunk(req_state, pooling_output=None)
+                except Exception:
+                    logger.exception(
+                        "[Stage-%s] async_chunk send_chunk failed for req=%s",
+                        getattr(self, "_stage_id", -1),
+                        rid,
+                    )
+                finally:
+                    if _had_attr:
+                        try:
+                            req_state.is_finished = _orig  # type: ignore[assignment]
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            delattr(req_state, "is_finished")
+                        except Exception:
+                            pass
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             routed_experts_dict = None
