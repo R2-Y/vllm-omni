@@ -41,6 +41,7 @@ logger = init_logger(__name__)
 from vllm_omni.benchmarks.audio_continuity import compute_continuity_stats
 from vllm_omni.benchmarks.data_modules.daily_omni_dataset import DailyOmniDataset, DailyOmniSampleRequest
 from vllm_omni.benchmarks.data_modules.omniinteract_dataset import (
+    DEFAULT_AURA_SYSTEM_PROMPT_FOR_OMNIINTERACT,
     OmniInteractDataset,
     OmniInteractSampleRequest,
 )
@@ -421,7 +422,7 @@ def get_samples(args, tokenizer):
         )
 
     if is_omniinteract:
-        if args.backend not in ["openai-chat-omni", "daily-omni"]:
+        if args.backend not in ["openai-chat-omni", "daily-omni", "openai-chat-omni-split-aura"]:
             raise ValueError(
                 "OmniInteract requires a multimodal backend that supports video/audio. "
                 f"Got backend={args.backend!r}; use --backend openai-chat-omni."
@@ -456,9 +457,9 @@ def get_samples(args, tokenizer):
             subsets=subsets,
             inline_local_video=getattr(args, "omniinteract_inline_local_video", False),
             input_mode=getattr(args, "omniinteract_input_mode", "video"),
-            aura_tts_task_type=getattr(args, "omniinteract_aura_tts_task_type", "Base"),
+            aura_tts_task_type=getattr(args, "omniinteract_aura_tts_task_type", "CustomVoice"),
             aura_tts_language=getattr(args, "omniinteract_aura_tts_language", "Chinese"),
-            aura_tts_speaker=getattr(args, "omniinteract_aura_tts_speaker", None),
+            aura_tts_speaker=getattr(args, "omniinteract_aura_tts_speaker", "Vivian"),
             aura_tts_ref_audio=getattr(args, "omniinteract_aura_tts_ref_audio", None),
             aura_tts_ref_text=getattr(args, "omniinteract_aura_tts_ref_text", None),
             disable_shuffle=getattr(args, "disable_shuffle", False),
@@ -795,6 +796,242 @@ def _image_generation_ms_from_content(content: Any) -> float:
         if gen_values:
             return max(gen_values)
     return 0.0
+
+
+def _join_openai_url(base_url: str, path: str) -> str:
+    return base_url.rstrip("/") + path
+
+
+def _extract_omniinteract_media(messages: list[dict[str, Any]] | None) -> tuple[str, str]:
+    audio_url = ""
+    video_url = ""
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "audio_url":
+                audio = item.get("audio_url")
+                if isinstance(audio, dict):
+                    audio_url = str(audio.get("url") or audio_url)
+            elif item.get("type") == "video_url":
+                video = item.get("video_url")
+                if isinstance(video, dict):
+                    video_url = str(video.get("url") or video_url)
+    if not audio_url:
+        raise ValueError("OmniInteract split AURA requires audio_url in omni_chat_messages.")
+    return audio_url, video_url
+
+
+def _extract_chat_text(data: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for choice in data.get("choices") or []:
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+    return "".join(parts).strip()
+
+
+async def _post_chat_json(
+    session: aiohttp.ClientSession,
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    async with session.post(url=url, json=payload, headers=headers) as response:
+        if response.status != 200:
+            text = await response.text()
+            raise RuntimeError(f"{url} returned HTTP {response.status}: {text}")
+        return await response.json()
+
+
+async def async_request_openai_chat_omni_split_aura(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> MixRequestFuncOutput:
+    """Benchmark AURA split services: ASR chat -> AURA chat -> TTS speech."""
+
+    output = MixRequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+    output.itl = []
+    output.stage_metrics = {}
+    output.output_tokens = 0
+
+    extra_body = dict(request_func_input.extra_body or {})
+    split = extra_body.get("omniinteract_split_services")
+    if not isinstance(split, dict):
+        split = {}
+
+    asr_base_url = str(split.get("asr_base_url") or "http://127.0.0.1:8661")
+    aura_base_url = str(split.get("aura_base_url") or "http://127.0.0.1:8662")
+    tts_base_url = str(split.get("tts_base_url") or "http://127.0.0.1:8663")
+    asr_model = str(split.get("asr_model") or "Qwen/Qwen3-ASR-1.7B")
+    aura_model = str(split.get("aura_model") or "aurateam/AURA")
+    tts_model = str(split.get("tts_model") or "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+
+    additional_info = extra_body.get("additional_information")
+    if not isinstance(additional_info, dict):
+        additional_info = {}
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    sample_rate = 24000
+    sample_width = 2
+    channels = 1
+    total_pcm_bytes = 0
+    chunk_arrival_times_s: list[float] = []
+    chunk_sizes: list[int] = []
+
+    st = time.perf_counter()
+    output.start_time = st
+    try:
+        audio_url, video_url = _extract_omniinteract_media(getattr(request_func_input, "omni_chat_messages", None))
+
+        asr_data = await _post_chat_json(
+            session,
+            url=_join_openai_url(asr_base_url, "/v1/chat/completions"),
+            headers=headers,
+            payload={
+                "model": asr_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio_url", "audio_url": {"url": audio_url}},
+                            {"type": "text", "text": "Transcribe the audio accurately."},
+                        ],
+                    }
+                ],
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": 256,
+                "stream": False,
+            },
+        )
+        transcript = _extract_chat_text(asr_data)
+        if not transcript:
+            raise RuntimeError("Split ASR service returned empty transcript.")
+
+        aura_content: list[dict[str, Any]] = [{"type": "text", "text": transcript}]
+        if video_url:
+            aura_content.insert(0, {"type": "video_url", "video_url": {"url": video_url}})
+
+        aura_data = await _post_chat_json(
+            session,
+            url=_join_openai_url(aura_base_url, "/v1/chat/completions"),
+            headers=headers,
+            payload={
+                "model": aura_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": additional_info.get(
+                            "aura_system_prompt",
+                            DEFAULT_AURA_SYSTEM_PROMPT_FOR_OMNIINTERACT,
+                        ),
+                    },
+                    {"role": "user", "content": aura_content},
+                ],
+                "temperature": 0.5,
+                "top_p": 1.0,
+                "top_k": -1,
+                "max_tokens": request_func_input.output_len,
+                "stream": False,
+                "repetition_penalty": 1.0,
+            },
+        )
+        aura_text = _extract_chat_text(aura_data)
+        if not aura_text:
+            raise RuntimeError("Split AURA service returned empty response.")
+
+        timestamp = time.perf_counter()
+        output.ttft = timestamp - st
+        output.text_latency = output.ttft
+        output.generated_text = aura_text
+        output.output_tokens = max(1, len(aura_text.split()))
+        output.itl = [0.0] * max(0, int(output.output_tokens) - 1)
+
+        if aura_text.strip() == "<|silent|>":
+            output.latency = time.perf_counter() - st
+            output.success = True
+            return output
+
+        task_type = str(additional_info.get("tts_task_type") or "CustomVoice")
+        tts_payload: dict[str, Any] = {
+            "model": tts_model,
+            "input": aura_text,
+            "task_type": task_type,
+            "language": additional_info.get("tts_language") or "Chinese",
+            "stream": True,
+            "response_format": "pcm",
+        }
+        if task_type == "Base":
+            tts_payload["ref_audio"] = additional_info.get("tts_ref_audio")
+            tts_payload["ref_text"] = additional_info.get("tts_ref_text")
+            if additional_info.get("tts_x_vector_only_mode") is not None:
+                tts_payload["x_vector_only_mode"] = bool(additional_info.get("tts_x_vector_only_mode"))
+        else:
+            tts_payload["voice"] = additional_info.get("tts_speaker") or "Vivian"
+            if additional_info.get("tts_instruct"):
+                tts_payload["instructions"] = additional_info["tts_instruct"]
+
+        async with session.post(
+            url=_join_openai_url(tts_base_url, "/v1/audio/speech"),
+            json=tts_payload,
+            headers=headers,
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise RuntimeError(f"TTS service returned HTTP {response.status}: {text}")
+            async for chunk in response.content.iter_any():
+                if not chunk:
+                    continue
+                timestamp = time.perf_counter()
+                if output.audio_ttfp == 0.0:
+                    output.audio_ttfp = timestamp - st
+                total_pcm_bytes += len(chunk)
+                chunk_arrival_times_s.append(timestamp - st)
+                chunk_sizes.append(len(chunk))
+
+        end_time = time.perf_counter()
+        output.latency = end_time - st
+        total_samples = total_pcm_bytes // (sample_width * channels)
+        output.audio_duration = total_samples / sample_rate
+        output.audio_frames = total_samples
+        output.audio_rtf = output.latency / output.audio_duration if output.audio_duration > 0 else 0.0
+        continuity = compute_continuity_stats(
+            chunk_arrival_times_s=chunk_arrival_times_s,
+            chunk_bytes=chunk_sizes,
+            sample_rate=sample_rate,
+            sample_width=sample_width,
+            channels=channels,
+            threshold_s=_audio_continuity_threshold_s(),
+        )
+        output.audio_underrun_s = continuity.max_underrun_s
+        output.audio_continuity_ok = continuity.is_continuous
+        output.audio_underrun_event_count = continuity.underrun_event_count
+        output.success = True
+    except Exception:
+        output.success = False
+        output.error = traceback.format_exc()
+        logger.error("ERROR: split AURA benchmark request failed, reason is: %s", output.error)
+    finally:
+        if pbar:
+            pbar.update(1)
+    return output
 
 
 async def async_request_openai_chat_omni_completions(
@@ -1429,6 +1666,10 @@ async def async_request_openai_audio_speech(
 ASYNC_REQUEST_FUNCS["openai-chat-omni"] = async_request_openai_chat_omni_completions
 if "openai-chat-omni" not in OPENAI_COMPATIBLE_BACKENDS:
     OPENAI_COMPATIBLE_BACKENDS.append("openai-chat-omni")
+
+ASYNC_REQUEST_FUNCS["openai-chat-omni-split-aura"] = async_request_openai_chat_omni_split_aura
+if "openai-chat-omni-split-aura" not in OPENAI_COMPATIBLE_BACKENDS:
+    OPENAI_COMPATIBLE_BACKENDS.append("openai-chat-omni-split-aura")
 
 ASYNC_REQUEST_FUNCS["openai-audio-speech"] = async_request_openai_audio_speech
 if "openai-audio-speech" not in OPENAI_COMPATIBLE_BACKENDS:

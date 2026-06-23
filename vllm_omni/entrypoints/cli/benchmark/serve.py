@@ -166,12 +166,48 @@ def add_omniinteract_cli_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     g.add_argument(
+        "--omniinteract-split-asr-base-url",
+        type=str,
+        default="http://127.0.0.1:8661",
+        help="ASR service base URL for --backend openai-chat-omni-split-aura.",
+    )
+    g.add_argument(
+        "--omniinteract-split-aura-base-url",
+        type=str,
+        default="http://127.0.0.1:8662",
+        help="AURA service base URL for --backend openai-chat-omni-split-aura.",
+    )
+    g.add_argument(
+        "--omniinteract-split-tts-base-url",
+        type=str,
+        default="http://127.0.0.1:8663",
+        help="Qwen3-TTS service base URL for --backend openai-chat-omni-split-aura.",
+    )
+    g.add_argument(
+        "--omniinteract-split-asr-model",
+        type=str,
+        default="Qwen/Qwen3-ASR-1.7B",
+        help="Model name sent to the split ASR service.",
+    )
+    g.add_argument(
+        "--omniinteract-split-aura-model",
+        type=str,
+        default="aurateam/AURA",
+        help="Model name sent to the split AURA service.",
+    )
+    g.add_argument(
+        "--omniinteract-split-tts-model",
+        type=str,
+        default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        help="Model name sent to the split TTS service.",
+    )
+    g.add_argument(
         "--omniinteract-aura-tts-task-type",
         type=str,
         choices=["Base", "CustomVoice"],
-        default="Base",
+        default="CustomVoice",
         help=(
-            "TTS task type for OmniInteract AURA mode. Base requires "
+            "TTS task type for OmniInteract AURA mode. Defaults to CustomVoice. Base requires "
             "--omniinteract-aura-tts-ref-audio and --omniinteract-aura-tts-ref-text."
         ),
     )
@@ -184,7 +220,7 @@ def add_omniinteract_cli_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--omniinteract-aura-tts-speaker",
         type=str,
-        default=None,
+        default="Vivian",
         help="TTS speaker passed to OmniInteract AURA CustomVoice mode.",
     )
     g.add_argument(
@@ -304,7 +340,14 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
                 if extra:
                     action.choices = list(action.choices) + extra
             if action.dest == "backend" and action.choices is not None:
-                extra = [c for c in ("openai-image-edits-omni",) if c not in action.choices]
+                extra = [
+                    c
+                    for c in (
+                        "openai-image-edits-omni",
+                        "openai-chat-omni-split-aura",
+                    )
+                    if c not in action.choices
+                ]
                 if extra:
                     action.choices = list(action.choices) + extra
         _extend_omni_dataset_name_choices(parser)
@@ -355,6 +398,17 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
             os.environ["SEED_TTS_WER_EVAL"] = "1"
         if getattr(args, "seed_tts_wer_save_items", False):
             os.environ["SEED_TTS_WER_SAVE_ITEMS"] = "1"
+        if getattr(args, "backend", None) == "openai-chat-omni-split-aura":
+            extra_body = dict(getattr(args, "extra_body", None) or {})
+            extra_body["omniinteract_split_services"] = {
+                "asr_base_url": getattr(args, "omniinteract_split_asr_base_url"),
+                "aura_base_url": getattr(args, "omniinteract_split_aura_base_url"),
+                "tts_base_url": getattr(args, "omniinteract_split_tts_base_url"),
+                "asr_model": getattr(args, "omniinteract_split_asr_model"),
+                "aura_model": getattr(args, "omniinteract_split_aura_model"),
+                "tts_model": getattr(args, "omniinteract_split_tts_model"),
+            }
+            args.extra_body = extra_body
         image_edits_bot_task = getattr(args, "image_edits_bot_task", None)
         if image_edits_bot_task is not None:
             extra_body = dict(getattr(args, "extra_body", None) or {})

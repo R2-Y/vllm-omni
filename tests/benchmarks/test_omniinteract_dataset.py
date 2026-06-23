@@ -187,16 +187,12 @@ def test_omniinteract_dataset_aura_mode_sends_audio_and_video(omniinteract_root:
     audio_dir = omniinteract_root / "1q1a" / "audios"
     audio_dir.mkdir()
     (audio_dir / "0001_0.wav").write_bytes(b"fake-wav")
-    ref_audio = omniinteract_root / "ref.wav"
-    ref_audio.write_bytes(b"fake-ref-wav")
     ds = OmniInteractDataset(
         dataset_path=str(omniinteract_root),
         random_seed=0,
         disable_shuffle=True,
         input_mode="aura",
         aura_tts_language="English",
-        aura_tts_ref_audio=str(ref_audio),
-        aura_tts_ref_text="reference transcript",
     )
     reqs = ds.sample(mock_tokenizer, num_requests=1, no_oversample=True)
     assert len(reqs) == 1
@@ -211,10 +207,9 @@ def test_omniinteract_dataset_aura_mode_sends_audio_and_video(omniinteract_root:
     assert req.omni_extra_body["modalities"] == ["text", "audio"]
     assert req.omni_extra_body["mm_processor_kwargs"] == {"use_audio_in_video": False}
     assert len(req.omni_extra_body["sampling_params_list"]) == 4
-    assert req.omni_extra_body["additional_information"]["tts_task_type"] == "Base"
+    assert req.omni_extra_body["additional_information"]["tts_task_type"] == "CustomVoice"
     assert req.omni_extra_body["additional_information"]["tts_language"] == "English"
-    assert req.omni_extra_body["additional_information"]["tts_ref_audio"] == str(ref_audio.resolve())
-    assert req.omni_extra_body["additional_information"]["tts_ref_text"] == "reference transcript"
+    assert req.omni_extra_body["additional_information"]["tts_speaker"] == "Vivian"
 
 
 def test_omniinteract_dataset_aura_mode_passes_custom_voice_speaker(omniinteract_root: Path, mock_tokenizer):
@@ -251,6 +246,7 @@ def test_omniinteract_dataset_aura_mode_requires_base_tts_refs(omniinteract_root
         random_seed=0,
         disable_shuffle=True,
         input_mode="aura",
+        aura_tts_task_type="Base",
     )
 
     with pytest.raises(ValueError, match="requires both"):
