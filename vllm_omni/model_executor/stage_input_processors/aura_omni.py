@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import soundfile as sf
 import torch
 from vllm.logger import init_logger
@@ -19,19 +22,40 @@ from vllm_omni.inputs.data import OmniTokensPrompt
 from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
     PRECOMPUTED_TEXT_IDS_KEY,
 )
-
-logger = init_logger(__name__)
-
-DEFAULT_AURA_SYSTEM_PROMPT = (
-    "You are receiving a live video stream where the final frame is the present moment. "
-    "Respond only when a response is needed based on the user's message or the visual context. "
-    "Otherwise, output '<|silent|>' to signify silence. Respond in Chinese."
+from vllm_omni.model_executor.stage_input_processors.aura_session_history import (
+    DEFAULT_AURA_SYSTEM_PROMPT,
+    SILENT_TEXT,
+    SessionHistory,
+    get_session_history,
+    is_effectively_silent,
+    pop_transcript_for_request,
+    record_transcript_for_request,
 )
 
-SILENT_TEXT = "<|silent|>"
 QWEN_IM_START_ID = 151644
 QWEN_IM_END_ID = 151645
 QWEN_ASSISTANT_ID = 77091
+AURA_SILENT_TOKEN_IDS = [151669]
+QWEN_TEXT_SILENT_TOKEN_IDS = [27, 91, 68658, 91, 29]
+QWEN_TEXT_SILENT_PREFIX_TOKEN_IDS = [
+    [27],
+    [27, 91],
+    [27, 91, 34804],
+    [27, 91, 34804, 91],
+]
+
+logger = init_logger(__name__)
+
+
+def _aura_log_turn_prompt_enabled() -> bool:
+    return os.environ.get("VLLM_AURA_LOG_TURN_PROMPT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 QWEN_NEWLINE_ID = 198
 QWEN_ASSISTANT_PREFIX_IDS = [QWEN_IM_START_ID, QWEN_ASSISTANT_ID, QWEN_NEWLINE_ID]
 QWEN_ASSISTANT_SUFFIX_IDS = [
@@ -41,17 +65,23 @@ QWEN_ASSISTANT_SUFFIX_IDS = [
     QWEN_ASSISTANT_ID,
     QWEN_NEWLINE_ID,
 ]
-AURA_SILENT_TOKEN_IDS = [151669]
-QWEN_TEXT_SILENT_TOKEN_IDS = [27, 91, 68658, 91, 29]
-QWEN_TEXT_SILENT_PREFIX_TOKEN_IDS = [
-    [27],
-    [27, 91],
-    [27, 91, 34804],
-    [27, 91, 34804, 91],
-]
 DEFAULT_QWEN3_TTS_REF_AUDIO = "vllm-omni/tests/assets/qwen3_tts/clone_2.wav"
 DEFAULT_QWEN3_TTS_REF_TEXT = (
     "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you."
+)
+
+_AURA_TTS_INFO_KEYS = (
+    "tts_task_type",
+    "tts_language",
+    "tts_instruct",
+    "tts_max_new_tokens",
+    "tts_ref_audio",
+    "tts_ref_text",
+    "tts_x_vector_only_mode",
+    "tts_speaker",
+    "tts_non_streaming_mode",
+    "tts_ref_code_length",
+    "tts_pass_token_ids",
 )
 
 
@@ -61,6 +91,131 @@ def default_qwen3_tts_ref_audio_path() -> str:
     if bundled.is_file():
         return str(bundled)
     return DEFAULT_QWEN3_TTS_REF_AUDIO
+
+
+def default_aura_tts_additional_information() -> dict[str, Any]:
+    """Default Qwen3-TTS fields for AURA ``additional_information``.
+
+    Matches Base checkpoint deployments (e.g. ``aura_omni_gpu23.yaml``).
+    For CustomVoice checkpoints, set ``tts_task_type`` / ``tts_speaker`` explicitly.
+    """
+    return {
+        "tts_task_type": "Base",
+        "tts_language": "Chinese",
+        "tts_instruct": "",
+        "tts_ref_audio": default_qwen3_tts_ref_audio_path(),
+        "tts_ref_text": DEFAULT_QWEN3_TTS_REF_TEXT,
+        "tts_pass_token_ids": False,
+    }
+
+
+def aura_tts_additional_information_from_session(
+    *,
+    task_type: str | None = None,
+    language: str | None = None,
+    speaker: str | None = None,
+    ref_audio: str | None = None,
+    ref_text: str | None = None,
+    instruct: str | None = None,
+    max_new_tokens: int | None = None,
+    pass_token_ids: bool | None = None,
+) -> dict[str, Any]:
+    """Merge WebSocket ``session.config`` TTS fields into ``additional_information``."""
+    info = default_aura_tts_additional_information()
+    if isinstance(task_type, str) and task_type.strip():
+        info["tts_task_type"] = task_type.strip()
+    if isinstance(language, str) and language.strip():
+        info["tts_language"] = language.strip()
+    if isinstance(instruct, str):
+        info["tts_instruct"] = instruct
+    if isinstance(speaker, str) and speaker.strip():
+        info["tts_speaker"] = _normalize_qwen3_tts_speaker(speaker.strip())
+    if isinstance(ref_audio, str) and ref_audio.strip():
+        info["tts_ref_audio"] = ref_audio.strip()
+    if isinstance(ref_text, str) and ref_text.strip():
+        info["tts_ref_text"] = ref_text.strip()
+    if max_new_tokens is not None:
+        info["tts_max_new_tokens"] = int(max_new_tokens)
+    if pass_token_ids is not None:
+        info["tts_pass_token_ids"] = bool(pass_token_ids)
+    if info.get("tts_task_type") == "CustomVoice":
+        info.pop("tts_ref_audio", None)
+        info.pop("tts_ref_text", None)
+    return info
+
+
+def frames_to_video_tuple(
+    frames: list[np.ndarray],
+    *,
+    fps: float,
+    max_frames: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Stack per-turn frames into a ``(ndarray, metadata)`` video tuple for AURA."""
+    if not frames:
+        raise ValueError("At least one frame is required to build video_tuple")
+
+    selected = list(frames[-max_frames:])
+    if len(selected) == 1:
+        all_frames = np.stack([selected[0], selected[0]], axis=0)
+    else:
+        all_frames = np.stack(selected, axis=0)
+
+    if all_frames.shape[0] < 2:
+        all_frames = np.concatenate([all_frames, all_frames], axis=0)[:2]
+    elif all_frames.shape[0] > max_frames:
+        all_frames = all_frames[-max_frames:]
+
+    metadata = {
+        "fps": fps,
+        "duration": all_frames.shape[0] / fps,
+        "total_num_frames": int(all_frames.shape[0]),
+        "frames_indices": list(range(all_frames.shape[0])),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return all_frames, metadata
+
+
+def build_aura_streaming_turn_additional_information(
+    *,
+    session_id: str,
+    video_array: np.ndarray,
+    video_metadata: dict[str, Any],
+    system_prompt: str,
+    skip_asr: bool,
+    include_tts: bool,
+    tts_task_type: str | None = None,
+    tts_language: str | None = None,
+    tts_speaker: str | None = None,
+    tts_ref_audio: str | None = None,
+    tts_ref_text: str | None = None,
+    tts_instruct: str | None = None,
+    tts_max_new_tokens: int | None = None,
+    tts_pass_token_ids: bool | None = None,
+) -> dict[str, Any]:
+    """Build ``additional_information`` for one AURA streaming inference turn."""
+    additional_information: dict[str, Any] = {
+        "aura_session_id": session_id,
+        "deferred_multi_modal_data": {
+            "video": [(video_array, video_metadata)],
+        },
+        "aura_system_prompt": [system_prompt],
+        "omni_skip_stages": [0] if skip_asr else [],
+    }
+    if include_tts:
+        additional_information.update(
+            aura_tts_additional_information_from_session(
+                task_type=tts_task_type,
+                language=tts_language,
+                speaker=tts_speaker,
+                ref_audio=tts_ref_audio,
+                ref_text=tts_ref_text,
+                instruct=tts_instruct,
+                max_new_tokens=tts_max_new_tokens,
+                pass_token_ids=tts_pass_token_ids,
+            )
+        )
+    return additional_information
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -80,15 +235,26 @@ def _first_value(value: Any, default: Any = None) -> Any:
 
 
 def _first_bool(value: Any, default: bool = False) -> bool:
-    value = value[0] if isinstance(value, list) and value else value or default
+    value = _first_value(value, default)
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
 
 
-def _first_str(value: Any, default: str = "") -> str:
-    value = _first_value(value, default)
-    return value if isinstance(value, str) else default
+def _estimate_tts_max_new_tokens(text: str, content_ids: list[int], explicit: Any = None) -> int:
+    explicit = _first_value(explicit, None)
+    if explicit is not None:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+
+    # Qwen3-TTS emits one layer-0 codec token per 12 Hz audio frame. Keep the
+    # default cap proportional to spoken text so bad EOS or degenerate AURA
+    # text does not run to the deploy-wide upper bound.
+    spoken_chars = sum(1 for ch in text if not ch.isspace())
+    basis = max(spoken_chars, len(content_ids))
+    return min(1024, max(48, int(math.ceil(basis * 7 + 32))))
 
 
 def _normalize_qwen3_tts_speaker(speaker: Any) -> Any:
@@ -109,10 +275,6 @@ def _extract_output(source_output: Any) -> Any:
     return source_output
 
 
-def _is_finished(source_output: Any) -> bool:
-    return bool(getattr(source_output, "finished", False))
-
-
 def _extract_text(source_output: Any) -> str:
     output = _extract_output(source_output)
     cumulative_text = getattr(output, "cumulative_text", None)
@@ -130,6 +292,44 @@ def _extract_text(source_output: Any) -> str:
             if isinstance(value, list) and value and isinstance(value[0], str):
                 return value[0]
     return ""
+
+
+def _clean_asr_transcript(text: str) -> str:
+    """Strip Qwen3-ASR wrappers like ``language Chinese<asr_text>...``."""
+    if not isinstance(text, str):
+        return ""
+    cleaned = text.strip()
+    if "<asr_text>" in cleaned:
+        cleaned = cleaned.split("<asr_text>", 1)[-1]
+    cleaned = re.sub(r"^language\s+[\w-]+\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _normalize_request_id_for_transcript(request_id: str) -> str:
+    """Map AsyncOmni internal ids (``{external}-{uuid8}``) to the external id.
+
+    ``AsyncOmni.generate()`` rewrites ``request_id`` to an internal orchestrator id
+    while the streaming handler keeps the external id for ``on_turn_complete``.
+    Transcript storage must use the external id so ``pop_turn_transcript`` works.
+    """
+    rid = str(request_id).strip()
+    if not rid:
+        return rid
+    head, tail = rid.rsplit("-", 1)
+    if len(tail) == 8 and all(ch in "0123456789abcdefABCDEF" for ch in tail):
+        return head
+    return rid
+
+
+def record_turn_transcript(request_id: str, transcript: str) -> None:
+    logger.debug(
+        "record_turn_transcript(request_id=%s) called without session_id; transcript is managed by AuraSessionState",
+        _normalize_request_id_for_transcript(request_id),
+    )
+
+
+def pop_turn_transcript(request_id: str | None) -> str:
+    return pop_transcript_for_request(request_id)
 
 
 def _extract_token_ids(source_output: Any) -> list[int]:
@@ -193,10 +393,6 @@ def _request_additional_info(request: Any) -> dict[str, Any]:
     if nested_info is not None:
         nested_info = decode_info(nested_info)
         if isinstance(nested_info, dict):
-            # Connector payloads wrap the original OpenAI request metadata under
-            # `additional_information`; expose those tts_* keys at the level
-            # consumed by asr2aura/aura2tts while preserving explicit top-level
-            # overrides.
             info = {**nested_info, **info}
 
     return info
@@ -211,147 +407,10 @@ def _request_output_text(request: Any) -> str:
     return ""
 
 
-def _clean_asr_text(text: Any) -> str:
-    if not isinstance(text, str):
-        return ""
-    cleaned = text
-    for marker in (
-        "<|im_start|>",
-        "<|im_end|>",
-        "<|vision_start|>",
-        "<|vision_end|>",
-        "<|video_pad|>",
-        "<|image_pad|>",
-    ):
-        cleaned = cleaned.replace(marker, "")
-    return " ".join(cleaned.split()).strip()
-
-
 def _clean_tts_text(text: Any) -> str:
     if not isinstance(text, str):
         return ""
     return " ".join(text.split()).strip()
-
-
-def _aura_system_prompt(additional_info: dict[str, Any]) -> str:
-    return (
-        _first_str(additional_info.get("aura_system_prompt"), DEFAULT_AURA_SYSTEM_PROMPT) or DEFAULT_AURA_SYSTEM_PROMPT
-    )
-
-
-def _merged_vision_multimodal_data(*sources: Any) -> dict[str, Any]:
-    multi_modal_data: dict[str, Any] = {}
-    for source in sources:
-        if isinstance(source, dict):
-            multi_modal_data.update(source)
-    return _vision_multimodal_data(multi_modal_data)
-
-
-def _tts_additional_info(additional_info: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in additional_info.items() if isinstance(key, str) and key.startswith("tts_")}
-
-
-def _build_aura_input_payload(
-    *,
-    transcript: str,
-    additional_info: dict[str, Any],
-    multi_modal_data: dict[str, Any],
-    requires_multimodal_data: bool,
-    mm_processor_kwargs: Any = None,
-    tokenizer: Any | None = None,
-    include_empty_multimodal_data: bool = False,
-) -> dict[str, Any]:
-    prompt = _aura_prompt(_aura_system_prompt(additional_info), transcript, multi_modal_data)
-    next_input: dict[str, Any] = {"prompt": prompt}
-    if tokenizer is not None:
-        prompt_token_ids = tokenizer.encode(prompt)
-        next_input["prompt_token_ids"] = prompt_token_ids
-        next_input["ids"] = {"prompt": prompt_token_ids}
-    if requires_multimodal_data and (multi_modal_data or include_empty_multimodal_data):
-        next_input["multi_modal_data"] = multi_modal_data
-    if mm_processor_kwargs is not None:
-        next_input["mm_processor_kwargs"] = mm_processor_kwargs
-    tts_info = _tts_additional_info(additional_info)
-    if tts_info:
-        next_input["additional_information"] = tts_info
-    return next_input
-
-
-def _tts_info_and_prompt_len(
-    additional_info: dict[str, Any],
-    *,
-    assistant_token_ids: list[int],
-    text: str,
-    prompt_len_token_ids: list[int] | None = None,
-    default_language: str = "Chinese",
-    allow_default_base_refs: bool = True,
-) -> tuple[dict[str, Any], int]:
-    task_type = _first_value(additional_info.get("tts_task_type"), "Base")
-    language = _first_value(additional_info.get("tts_language"), default_language)
-    instruct = _first_value(additional_info.get("tts_instruct"), "")
-    max_new_tokens = _first_value(additional_info.get("tts_max_new_tokens"), 2048)
-    tts_info: dict[str, Any] = {
-        "task_type": [task_type],
-        "language": [language],
-        "instruct": [instruct],
-        "max_new_tokens": [int(max_new_tokens)],
-    }
-    if assistant_token_ids:
-        tts_info[PRECOMPUTED_TEXT_IDS_KEY] = [assistant_token_ids]
-        prompt_len = _estimate_tts_prompt_len_from_token_ids(
-            assistant_token_ids,
-            task_type=str(task_type),
-            language=str(language),
-            instruct=str(instruct),
-        )
-    else:
-        text = _clean_tts_text(text)
-        tts_info["text"] = [text]
-        text_token_count_proxy = max(1, len(text)) if isinstance(text, str) else 1
-        token_ids_for_len = (
-            prompt_len_token_ids
-            if prompt_len_token_ids
-            else [0] * (text_token_count_proxy + len(QWEN_ASSISTANT_PREFIX_IDS) + len(QWEN_ASSISTANT_SUFFIX_IDS))
-        )
-        prompt_len = _estimate_tts_prompt_len_from_token_ids(
-            token_ids_for_len,
-            task_type=str(task_type),
-            language=str(language),
-            instruct=str(instruct),
-        )
-
-    if task_type == "Base":
-        ref_audio = _first_value(additional_info.get("tts_ref_audio"), None)
-        ref_text = _first_value(additional_info.get("tts_ref_text"), None)
-        if allow_default_base_refs:
-            ref_audio = ref_audio or default_qwen3_tts_ref_audio_path()
-            ref_text = ref_text or DEFAULT_QWEN3_TTS_REF_TEXT
-        x_vector_only_mode = _first_bool(additional_info.get("tts_x_vector_only_mode"), False)
-        ref_code_len_value = _first_value(additional_info.get("tts_ref_code_length"), None)
-        ref_code_len = int(ref_code_len_value) if isinstance(ref_code_len_value, int) else None
-        if not x_vector_only_mode and ref_code_len is None:
-            ref_code_len = _estimate_ref_code_len_from_ref_audio(ref_audio)
-        if ref_code_len is not None:
-            tts_info["ref_code_length"] = [int(ref_code_len)]
-            prompt_len = _estimate_tts_prompt_len_from_token_ids(
-                assistant_token_ids if assistant_token_ids else [0] * max(1, len(text)),
-                task_type="Base",
-                language=str(language),
-                instruct=str(instruct),
-                x_vector_only_mode=x_vector_only_mode,
-                ref_code_len=ref_code_len,
-            )
-        if ref_audio:
-            tts_info["ref_audio"] = [ref_audio]
-        if ref_text:
-            tts_info["ref_text"] = [ref_text]
-        tts_info["x_vector_only_mode"] = [x_vector_only_mode]
-
-    elif task_type == "CustomVoice":
-        speaker = _first_value(additional_info.get("tts_speaker"), "Vivian")
-        tts_info["speaker"] = [_normalize_qwen3_tts_speaker(speaker)]
-
-    return tts_info, prompt_len
 
 
 def _source_prompt_by_request_id(source_outputs: list[Any], prompt: Any) -> dict[str, dict[str, Any]]:
@@ -378,10 +437,73 @@ def _aura_prompt(system_prompt: str, transcript: str, multi_modal_data: dict[str
     vision = _vision_placeholder(multi_modal_data)
     query = transcript.strip()
     user_body = f"{vision}{query}" if query else vision
-
     return (
-        f"<|im_start|>system\n{system_prompt}<|im_end|><|im_start|>user\n{user_body}<|im_end|><|im_start|>assistant\n"
+        f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+        f"<|im_start|>user\n{user_body}<|im_end|>\n"
+        "<|im_start|>assistant\n"
     )
+
+
+def build_aura_input(
+    transcript: str,
+    additional_info: dict[str, Any],
+    multi_modal_data: dict[str, Any],
+    request_id: str,
+    tokenizer: Any | None = None,
+    *,
+    requires_multimodal_data: bool = True,
+    mm_processor_kwargs: Any = None,
+) -> dict[str, Any]:
+    """Build the AURA stage-1 input for both sync and async-chunk ASR output."""
+    session_id = additional_info.get("aura_session_id")
+    history = get_session_history(str(session_id)) if session_id else None
+    system_prompt = _first_value(additional_info.get("aura_system_prompt"), DEFAULT_AURA_SYSTEM_PROMPT)
+    transcript = _clean_asr_transcript(transcript)
+    vision_data = _vision_multimodal_data(multi_modal_data)
+
+    if session_id and history is not None:
+        video_tuple = video_tuple_from_additional_info(additional_info)
+        record_transcript_for_request(str(session_id), request_id, transcript)
+        vllm_inputs = history.preview_vllm_inputs(transcript, video_tuple=video_tuple)
+        prompt = vllm_inputs["prompt"]
+        vision_data = vllm_inputs.get("multi_modal_data", {})
+    elif additional_info.get("aura_session_state") is not None:
+        history = SessionHistory.from_dict(additional_info["aura_session_state"])
+        history.add_user_message(transcript, video_tuple=video_tuple_from_additional_info(additional_info))
+        vllm_inputs = history.get_vllm_inputs()
+        prompt = vllm_inputs["prompt"]
+        vision_data = vllm_inputs.get("multi_modal_data", {})
+    else:
+        if session_id:
+            logger.warning(
+                "AURA session_id=%s not found in server-side store; falling back to single-turn prompt",
+                session_id,
+            )
+        prompt = _aura_prompt(str(system_prompt), transcript, vision_data)
+
+    if _aura_log_turn_prompt_enabled():
+        logger.info(
+            "AURA turn prompt request_id=%s transcript=%r: %s",
+            request_id,
+            transcript,
+            _summarize_vllm_inputs({"prompt": prompt, "multi_modal_data": vision_data}),
+        )
+
+    additional_for_next = _copy_aura_tts_fields(additional_info)
+    additional_for_next["aura_system_prompt"] = [str(system_prompt)]
+    next_input: dict[str, Any] = {
+        "prompt": prompt,
+        "additional_information": additional_for_next,
+    }
+    if tokenizer is not None:
+        prompt_token_ids = tokenizer.encode(prompt)
+        next_input["prompt_token_ids"] = prompt_token_ids
+        next_input["ids"] = {"prompt": prompt_token_ids}
+    if requires_multimodal_data:
+        next_input["multi_modal_data"] = vision_data
+    if mm_processor_kwargs is not None:
+        next_input["mm_processor_kwargs"] = mm_processor_kwargs
+    return next_input
 
 
 def asr2aura(
@@ -389,30 +511,33 @@ def asr2aura(
     prompt: Any = None,
     requires_multimodal_data: bool = True,
 ) -> list[dict[str, Any]]:
-    """Build AURA Qwen3-VL prompts from ASR transcripts and original video payloads."""
+    """Build AURA Qwen3-VL prompts from ASR output and optional SessionHistory."""
     prompt_by_request_id = _source_prompt_by_request_id(source_outputs, prompt)
     next_inputs: list[dict[str, Any]] = []
+
     for idx, source_output in enumerate(source_outputs):
         src_prompt = prompt_by_request_id.get(str(getattr(source_output, "request_id", idx)), {})
         additional_info = src_prompt.get("additional_information") or {}
-        transcript = _extract_text(source_output)
-        multi_modal_data = _merged_vision_multimodal_data(
-            src_prompt.get("multi_modal_data") or {},
-            additional_info.get("deferred_multi_modal_data") or {},
-        )
-
+        request_id = str(getattr(source_output, "request_id", idx))
+        multi_modal_data: dict[str, Any] = {}
+        source_multi_modal_data = src_prompt.get("multi_modal_data") or {}
+        if isinstance(source_multi_modal_data, dict):
+            multi_modal_data.update(source_multi_modal_data)
+        deferred_multi_modal_data = additional_info.get("deferred_multi_modal_data") or {}
+        if isinstance(deferred_multi_modal_data, dict):
+            multi_modal_data.update(deferred_multi_modal_data)
         next_inputs.append(
-            _build_aura_input_payload(
-                transcript=transcript,
-                additional_info=additional_info,
-                multi_modal_data=multi_modal_data,
+            build_aura_input(
+                _extract_text(source_output),
+                additional_info,
+                multi_modal_data,
+                request_id,
                 requires_multimodal_data=requires_multimodal_data,
                 mm_processor_kwargs=src_prompt.get("mm_processor_kwargs"),
-                include_empty_multimodal_data=True,
             )
         )
-    return next_inputs
 
+    return next_inputs
 
 def asr2aura_async_chunk(
     transfer_manager: Any,
@@ -440,11 +565,11 @@ def asr2aura_async_chunk(
     output_text = _request_output_text(request)
     if output_text:
         previous_text = str(state.get("asr_text", ""))
-        cleaned_output_text = _clean_asr_text(output_text)
+        cleaned_output_text = _clean_asr_transcript(output_text)
         state["asr_text"] = (
             cleaned_output_text
             if cleaned_output_text.startswith(previous_text)
-            else _clean_asr_text(previous_text + output_text)
+            else _clean_asr_transcript(previous_text + output_text)
         )
 
     if not finished:
@@ -454,24 +579,104 @@ def asr2aura_async_chunk(
     if not state.get("asr_text"):
         token_ids = _ensure_int_list(getattr(request, "output_token_ids", []) or [])
         if token_ids:
-            state["asr_text"] = _clean_asr_text(tokenizer.decode(token_ids))
+            state["asr_text"] = _clean_asr_transcript(tokenizer.decode(token_ids))
 
     additional_info = _request_additional_info(request)
-    multi_modal_data = _merged_vision_multimodal_data(
-        getattr(request, "multi_modal_data", None) or {},
-        additional_info.get("deferred_multi_modal_data") or {},
-    )
-    mm_processor_kwargs = getattr(request, "mm_processor_kwargs", None)
-
-    payload = _build_aura_input_payload(
+    multi_modal_data = {}
+    request_mm = getattr(request, "multi_modal_data", None)
+    if isinstance(request_mm, dict):
+        multi_modal_data.update(request_mm)
+    deferred_mm = additional_info.get("deferred_multi_modal_data")
+    if isinstance(deferred_mm, dict):
+        multi_modal_data.update(deferred_mm)
+    
+    return build_aura_input(
         transcript=str(state.get("asr_text", "")),
         additional_info=additional_info,
         multi_modal_data=multi_modal_data,
-        requires_multimodal_data=True,
-        mm_processor_kwargs=mm_processor_kwargs,
+        request_id=str(request_id),
         tokenizer=tokenizer,
+        requires_multimodal_data=True,
+        mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
     )
-    return payload
+
+
+def _normalize_video_tuple(
+    frames: Any,
+    metadata: dict[str, Any] | None,
+) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Return (uint8 ndarray [T,H,W,C], metadata) with at least two frames."""
+    if frames is None:
+        return None
+    video_array = np.asarray(frames, dtype=np.uint8)
+    if video_array.ndim != 4:
+        return None
+    meta = dict(metadata or {})
+    if video_array.shape[0] < 2:
+        video_array = np.concatenate([video_array, video_array], axis=0)[:2]
+        meta = dict(meta)
+        meta["total_num_frames"] = 2
+        meta["duration"] = 2 / float(meta.get("fps", 2.0))
+    return video_array, meta
+
+
+def video_tuple_from_aura_turn_video(aura_turn_video: Any) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Legacy JSON-serializable turn video: ``{frames: list, metadata: dict}``."""
+    if not isinstance(aura_turn_video, dict):
+        return None
+    return _normalize_video_tuple(aura_turn_video.get("frames"), aura_turn_video.get("metadata"))
+
+
+def video_tuple_from_deferred_multi_modal(deferred: Any) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Read the first ``(ndarray, metadata)`` video entry from deferred multimodal data."""
+    if not isinstance(deferred, dict):
+        return None
+    videos = deferred.get("video")
+    if not videos:
+        return None
+    first = videos[0] if isinstance(videos, list) else videos
+    if isinstance(first, (tuple, list)) and len(first) == 2:
+        return _normalize_video_tuple(first[0], first[1] if isinstance(first[1], dict) else {})
+    return None
+
+
+def video_tuple_from_additional_info(additional_info: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Resolve per-turn video from ``deferred_multi_modal_data`` or legacy ``aura_turn_video``."""
+    video_tuple = video_tuple_from_deferred_multi_modal(additional_info.get("deferred_multi_modal_data"))
+    if video_tuple is not None:
+        return video_tuple
+    return video_tuple_from_aura_turn_video(additional_info.get("aura_turn_video"))
+
+
+def _copy_aura_tts_fields(additional_info: dict[str, Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key in _AURA_TTS_INFO_KEYS:
+        if key in additional_info:
+            copied[key] = additional_info[key]
+    return copied
+
+
+def _summarize_vllm_inputs(vllm_inputs: dict[str, Any]) -> str:
+    """JSON summary of AURA stage-1 prompt (text skeleton + video metadata, no pixels)."""
+    videos = vllm_inputs.get("multi_modal_data", {}).get("video", [])
+    video_info: list[dict[str, Any]] = []
+    for vt in videos:
+        arr, meta = vt
+        video_info.append(
+            {
+                "frames": int(arr.shape[0]),
+                "shape": list(arr.shape),
+                "fps": meta.get("fps"),
+                "duration": meta.get("duration"),
+            }
+        )
+    return json.dumps(
+        {
+            "prompt_text": vllm_inputs.get("prompt", ""),
+            "videos": video_info,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _estimate_ref_code_len_from_ref_audio(ref_audio: Any) -> int | None:
@@ -587,52 +792,136 @@ def _estimate_tts_prompt_len_from_token_ids(
     return int(base_len + max(assistant_len, 1))
 
 
+def _aura2tts_empty_finished_payload() -> dict[str, Any]:
+    """Finish-sentinel for silent AURA turns in async_chunk.
+
+    Releases the prewarmed Talker wait gate without running synthesis,
+    matching the empty-finished payload pattern used by Qwen3-TTS stages.
+    """
+    return {
+        "prompt_token_ids": [],
+        "meta": {"finished": torch.tensor(True, dtype=torch.bool)},
+    }
+
+
+def build_tts_talker_input(
+    text: str,
+    content_ids: list[int],
+    additional_info: dict[str, Any],
+    pass_token_ids: bool | None,
+) -> OmniTokensPrompt | None:
+    """Build the Qwen3-TTS Talker input shared by sync and async-chunk paths."""
+    text = _clean_tts_text(text)
+    content_ids = _trim_aura_response_token_ids(content_ids)
+    if is_effectively_silent(text) or _is_silent_token_prefix(content_ids):
+        return None
+
+    task_type = _first_value(additional_info.get("tts_task_type"), "Base")
+    language = _first_value(additional_info.get("tts_language"), "Chinese")
+    instruct = _first_value(additional_info.get("tts_instruct"), "")
+    x_vector_only_mode = _first_bool(additional_info.get("tts_x_vector_only_mode"), False)
+    non_streaming_mode_raw = _first_value(additional_info.get("tts_non_streaming_mode"), None)
+    non_streaming_mode = non_streaming_mode_raw if isinstance(non_streaming_mode_raw, bool) else None
+    ref_code_len_raw = _first_value(additional_info.get("tts_ref_code_length"), None)
+    ref_code_len = int(ref_code_len_raw) if isinstance(ref_code_len_raw, int) else None
+    pass_token_ids = _first_bool(pass_token_ids, False)
+
+    assistant_token_ids = QWEN_ASSISTANT_PREFIX_IDS + content_ids + QWEN_ASSISTANT_SUFFIX_IDS if content_ids else []
+    ref_audio = None
+    ref_text = None
+    if task_type == "Base" and not x_vector_only_mode and ref_code_len is None:
+        ref_audio = _first_value(additional_info.get("tts_ref_audio"), None)
+        ref_code_len = _estimate_ref_code_len_from_ref_audio(ref_audio)
+
+    tts_info = {
+        "task_type": [task_type],
+        "language": [language],
+        "instruct": [instruct],
+        "max_new_tokens": [
+            _estimate_tts_max_new_tokens(
+                text,
+                content_ids,
+                additional_info.get("tts_max_new_tokens"),
+            )
+        ],
+    }
+    if pass_token_ids and assistant_token_ids:
+        tts_info[PRECOMPUTED_TEXT_IDS_KEY] = [assistant_token_ids]
+    else:
+        tts_info["text"] = [text]
+    if ref_code_len is not None:
+        tts_info["ref_code_length"] = [int(ref_code_len)]
+
+    prompt_len = _estimate_tts_prompt_len_from_token_ids(
+        assistant_token_ids if assistant_token_ids else [0] * max(0, len(text)),
+        task_type=str(task_type),
+        language=str(language),
+        instruct=str(instruct),
+        x_vector_only_mode=x_vector_only_mode,
+        non_streaming_mode=non_streaming_mode,
+        ref_code_len=ref_code_len,
+    )
+
+    if task_type == "Base":
+        ref_audio = ref_audio or _first_value(additional_info.get("tts_ref_audio"), None)
+        ref_text = _first_value(additional_info.get("tts_ref_text"), None)
+        if not ref_audio:
+            ref_audio = default_qwen3_tts_ref_audio_path()
+        if not ref_text:
+            ref_text = DEFAULT_QWEN3_TTS_REF_TEXT
+        tts_info["ref_audio"] = [ref_audio]
+        tts_info["ref_text"] = [ref_text]
+        tts_info["x_vector_only_mode"] = [x_vector_only_mode]
+    elif task_type == "CustomVoice":
+        tts_info["speaker"] = [_normalize_qwen3_tts_speaker(_first_value(additional_info.get("tts_speaker"), "Vivian"))]
+
+    logger.info(
+        "[aura2tts] build talker input task=%s language=%s speaker=%s text_len=%d "
+        "content_ids=%d pass_token_ids=%s prompt_len=%d max_new_tokens=%s ref_code_len=%s "
+        "has_ref_audio=%s text_preview=%r",
+        task_type,
+        language,
+        tts_info.get("speaker", [None])[0],
+        len(text),
+        len(content_ids),
+        pass_token_ids,
+        prompt_len,
+        tts_info.get("max_new_tokens"),
+        ref_code_len,
+        bool(tts_info.get("ref_audio")),
+        text[:120],
+    )
+
+    return OmniTokensPrompt(
+        prompt_token_ids=[0] * prompt_len,
+        additional_information=tts_info,
+        multi_modal_data=None,
+        mm_processor_kwargs=None,
+    )
+
+
 def aura2tts(
     source_outputs: list[Any],
     prompt: Any = None,
     requires_multimodal_data: bool = False,
-    streaming_context: Any | None = None,
 ) -> list[OmniTokensPrompt]:
     """Convert AURA text output into Qwen3-TTS Talker requests."""
     del requires_multimodal_data
-    del streaming_context
     prompt_by_request_id = _source_prompt_by_request_id(source_outputs, prompt)
     next_inputs: list[OmniTokensPrompt] = []
     for idx, source_output in enumerate(source_outputs):
         text = _extract_text(source_output).strip()
-        if not _is_finished(source_output) and text and SILENT_TEXT.startswith(text):
-            # AURA may stream the special silent marker token-by-token. Hold
-            # these prefixes until the marker is complete so TTS never speaks it.
-            continue
-        if not text or text == SILENT_TEXT:
-            continue
-
         src_prompt = prompt_by_request_id.get(str(getattr(source_output, "request_id", idx)), {})
         additional_info = src_prompt.get("additional_information") or {}
-        assistant_token_ids_for_len = _qwen3_tts_assistant_token_ids_from_aura(source_output)
         pass_token_ids = _first_bool(additional_info.get("tts_pass_token_ids"), False)
-        use_token_ids = pass_token_ids and bool(assistant_token_ids_for_len)
-        tts_info, prompt_len = _tts_info_and_prompt_len(
+        tts_input = build_tts_talker_input(
+            text,
+            _extract_token_ids(source_output),
             additional_info,
-            assistant_token_ids=assistant_token_ids_for_len if use_token_ids else [],
-            text=text,
-            prompt_len_token_ids=assistant_token_ids_for_len if not use_token_ids else None,
-            default_language="English",
-            allow_default_base_refs=False,
+            pass_token_ids,
         )
-
-        task_type = _first_value(additional_info.get("tts_task_type"), "Base")
-        if task_type == "Base":
-            if not tts_info.get("ref_audio") or not tts_info.get("ref_text"):
-                raise ValueError("AURA Base TTS requires tts_ref_audio and tts_ref_text.")
-        next_inputs.append(
-            OmniTokensPrompt(
-                prompt_token_ids=[0] * prompt_len,
-                additional_information=tts_info,
-                multi_modal_data=None,
-                mm_processor_kwargs=None,
-            )
-        )
+        if tts_input is not None:
+            next_inputs.append(tts_input)
     return next_inputs
 
 
@@ -650,10 +939,27 @@ def aura2tts_async_chunk(
 
     content_ids = _trim_aura_response_token_ids(_ensure_int_list(getattr(request, "output_token_ids", []) or []))
     finished = bool(is_finished or request.is_finished())
-    if content_ids and _is_silent_token_prefix(content_ids):
-        return None
-
     request_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", None)
+    logger.info(
+        "[aura2tts_async_chunk] req=%s is_finished_arg=%s request_finished=%s "
+        "content_ids=%d output_text_len=%d",
+        request_id,
+        is_finished,
+        finished,
+        len(content_ids),
+        len(_request_output_text(request) or ""),
+    )
+    if content_ids and _is_silent_token_prefix(content_ids):
+        if not finished:
+            logger.info(
+                "[aura2tts_async_chunk] req=%s holding silent-prefix partial content_ids=%d",
+                request_id,
+                len(content_ids),
+            )
+            return None
+        logger.info("[aura2tts_async_chunk] req=%s emitting silent finished payload", request_id)
+        return _aura2tts_empty_finished_payload()
+
     request_payload = getattr(transfer_manager, "request_payload", None)
     if request_payload is None:
         request_payload = {}
@@ -673,18 +979,28 @@ def aura2tts_async_chunk(
         )
 
     additional_info = _request_additional_info(request)
-    tts_metadata = _tts_additional_info(additional_info)
+    tts_metadata = _copy_aura_tts_fields(additional_info)
     if tts_metadata:
         state["aura2tts_tts_metadata"] = dict(tts_metadata)
 
     if not finished:
+        logger.info(
+            "[aura2tts_async_chunk] req=%s waiting for final AURA chunk accumulated_text_len=%d "
+            "accumulated_content_ids=%d tts_metadata_keys=%s",
+            request_id,
+            len(str(state.get("aura2tts_text", ""))),
+            len(state.get("aura2tts_content_ids", []) or []),
+            sorted(tts_metadata.keys()),
+        )
         return None
 
     content_ids = list(state.get("aura2tts_content_ids", content_ids) or [])
     if not content_ids:
+        logger.info("[aura2tts_async_chunk] req=%s finished with no content ids; no TTS input", request_id)
         return None
     if _is_silent_token_prefix(content_ids):
-        return None
+        logger.info("[aura2tts_async_chunk] req=%s final content is silent; emitting finish payload", request_id)
+        return _aura2tts_empty_finished_payload()
 
     cached_tts_metadata = state.get("aura2tts_tts_metadata")
     if isinstance(cached_tts_metadata, dict):
@@ -701,19 +1017,38 @@ def aura2tts_async_chunk(
                 getattr(request, "request_id", None),
             )
 
-    assistant_token_ids = QWEN_ASSISTANT_PREFIX_IDS + content_ids + QWEN_ASSISTANT_SUFFIX_IDS
-    use_token_ids = pass_token_ids
-    if not use_token_ids and not request_text:
-        use_token_ids = True
-    tts_info, prompt_len = _tts_info_and_prompt_len(
+    tts_input = build_tts_talker_input(
+        request_text,
+        content_ids,
         additional_info,
-        assistant_token_ids=assistant_token_ids if use_token_ids else [],
-        text=request_text,
-        prompt_len_token_ids=assistant_token_ids if not use_token_ids else None,
+        pass_token_ids,
     )
-
-    payload = {
-        **tts_info,
-        "prompt_token_ids": [0] * prompt_len,
-    }
+    if tts_input is None:
+        if is_effectively_silent(request_text) or _is_silent_token_prefix(content_ids):
+            logger.info("[aura2tts_async_chunk] req=%s TTS input is silent; emitting finish payload", request_id)
+            return _aura2tts_empty_finished_payload()
+        logger.info(
+            "[aura2tts_async_chunk] req=%s build_tts_talker_input returned None text_len=%d content_ids=%d",
+            request_id,
+            len(request_text),
+            len(content_ids),
+        )
+        return None
+    payload = dict(tts_input["additional_information"])
+    payload["prompt_token_ids"] = list(tts_input["prompt_token_ids"])
+    assistant_token_ids = QWEN_ASSISTANT_PREFIX_IDS + content_ids + QWEN_ASSISTANT_SUFFIX_IDS
+    if pass_token_ids and assistant_token_ids:
+        payload[PRECOMPUTED_TEXT_IDS_KEY] = [assistant_token_ids]
+        payload.pop("text", None)
+    logger.info(
+        "[aura2tts_async_chunk] req=%s emitting TTS payload prompt_len=%d text_len=%d "
+        "content_ids=%d pass_token_ids=%s max_new_tokens=%s keys=%s",
+        request_id,
+        len(payload.get("prompt_token_ids", []) or []),
+        len(request_text),
+        len(content_ids),
+        pass_token_ids,
+        payload.get("max_new_tokens"),
+        sorted(payload.keys()),
+    )
     return payload

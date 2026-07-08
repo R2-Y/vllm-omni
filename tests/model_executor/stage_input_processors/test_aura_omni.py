@@ -169,6 +169,21 @@ def test_aura2tts_builds_qwen3_tts_prompt_information():
     assert tts_input["additional_information"]["ref_text"] == ["Reference transcript sample."]
     assert tts_input["additional_information"]["x_vector_only_mode"] == [False]
     assert tts_input["additional_information"]["instruct"] == ["Calm voice."]
+    assert tts_input["additional_information"]["max_new_tokens"][0] < 2048
+
+
+def test_aura2tts_preserves_explicit_tts_max_new_tokens():
+    prompt = {
+        "additional_information": {
+            "tts_task_type": ["CustomVoice"],
+            "tts_speaker": ["Vivian"],
+            "tts_max_new_tokens": [96],
+        }
+    }
+
+    [tts_input] = aura2tts([_source_output("Hello.")], prompt=[prompt])
+
+    assert tts_input["additional_information"]["max_new_tokens"] == [96]
 
 
 def test_aura2tts_prefers_streaming_cumulative_text():
@@ -430,7 +445,7 @@ def test_aura2tts_async_chunk_decodes_text_instead_of_passing_source_token_ids(m
     assert payload["prompt_token_ids"]
 
 
-def test_aura2tts_async_chunk_holds_silent_token_prefix():
+def test_aura2tts_async_chunk_holds_silent_token_prefix_until_finished():
     request = SimpleNamespace(
         request_id="req-1",
         output_token_ids=[151669],
@@ -439,6 +454,39 @@ def test_aura2tts_async_chunk_holds_silent_token_prefix():
     )
 
     assert aura2tts_async_chunk(None, None, request) is None
+
+
+def test_aura2tts_async_chunk_emits_finish_payload_on_silent_turn():
+    request = SimpleNamespace(
+        request_id="req-1",
+        output_token_ids=[151669],
+        additional_information={},
+        is_finished=lambda: True,
+    )
+
+    payload = aura2tts_async_chunk(None, None, request, is_finished=True)
+
+    assert payload is not None
+    assert payload["prompt_token_ids"] == []
+    assert payload["meta"]["finished"].item() is True
+
+
+def test_aura2tts_async_chunk_emits_finish_payload_when_tts_input_is_silent():
+    transfer_manager = SimpleNamespace(request_payload={})
+    request = SimpleNamespace(
+        request_id="req-2",
+        external_req_id="req-2",
+        output_token_ids=[100, 101, 102],
+        output_text=SILENT_TEXT,
+        additional_information={},
+        is_finished=lambda: True,
+    )
+
+    payload = aura2tts_async_chunk(transfer_manager, None, request, is_finished=True)
+
+    assert payload is not None
+    assert payload["prompt_token_ids"] == []
+    assert payload["meta"]["finished"].item() is True
 
 
 def test_aura2tts_drops_silent_response():

@@ -45,7 +45,9 @@ from vllm_omni.engine.messages import (
     UnregisterRemoteReplicaMessage,
 )
 from vllm_omni.engine.orchestrator_monitor import create_orch_monitor, replica_key
-from vllm_omni.engine.serialization import serialize_additional_information
+from vllm_omni.engine.serialization import (
+    serialize_additional_information,
+)
 from vllm_omni.engine.stage_pool import StagePool
 from vllm_omni.metrics.prometheus import OmniRequestCounter
 from vllm_omni.metrics.stat_logger import OmniPrometheusStatLogger
@@ -116,6 +118,28 @@ def _infer_stage_audio_sample_rate(stage_pool: StagePool, default: int = 24000) 
     return default
 
 
+def _extract_max_new_tokens_override(next_input: Any) -> int:
+    if isinstance(next_input, dict):
+        additional = next_input.get("additional_information")
+    else:
+        additional = getattr(next_input, "additional_information", None)
+    if not isinstance(additional, dict):
+        return 0
+    return _coerce_int_scalar(additional.get("max_new_tokens") or additional.get("tts_max_new_tokens"))
+
+
+def _apply_next_input_max_tokens_override(
+    params: SamplingParams | PoolingParams,
+    next_input: Any,
+) -> SamplingParams | PoolingParams:
+    max_new_tokens = _extract_max_new_tokens_override(next_input)
+    if max_new_tokens <= 0 or not isinstance(params, SamplingParams):
+        return params
+    cloned = params.clone()
+    cloned.max_tokens = max_new_tokens if cloned.max_tokens is None else min(int(cloned.max_tokens), max_new_tokens)
+    return cloned
+
+
 def build_engine_core_request_from_tokens(
     request_id: str,
     prompt: dict[str, Any],
@@ -130,6 +154,7 @@ def build_engine_core_request_from_tokens(
         arrival_time = _time.time()
 
     prompt_token_ids = prompt["prompt_token_ids"]
+    additional_info = prompt.get("additional_information")
 
     sampling_params = None
     pooling_params = None
@@ -137,12 +162,32 @@ def build_engine_core_request_from_tokens(
         sampling_params = params.clone()
         if sampling_params.max_tokens is None and model_config is not None:
             sampling_params.max_tokens = model_config.max_model_len - len(prompt_token_ids)
+        if isinstance(additional_info, dict):
+            requested_max_new_tokens = _coerce_int_scalar(
+                additional_info.get("max_new_tokens") or additional_info.get("tts_max_new_tokens")
+            )
+            if requested_max_new_tokens > 0:
+                sampling_params.max_tokens = (
+                    requested_max_new_tokens
+                    if sampling_params.max_tokens is None
+                    else min(int(sampling_params.max_tokens), requested_max_new_tokens)
+                )
+                logger.info(
+                    "[Orchestrator][TTS max_tokens] req=%s prompt_len=%d resumable=%s "
+                    "requested_max_new_tokens=%d effective_sampling_max_tokens=%s model_max_len=%s",
+                    request_id,
+                    len(prompt_token_ids),
+                    resumable,
+                    requested_max_new_tokens,
+                    sampling_params.max_tokens,
+                    getattr(model_config, "max_model_len", None),
+                )
     else:
         pooling_params = params.clone()
 
     prompt_embeds: torch.Tensor | None = prompt.get("prompt_embeds")
     additional_info_payload = serialize_additional_information(
-        prompt.get("additional_information"),
+        additional_info,
         log_prefix=f"build_engine_core_request_from_tokens req={request_id}",
     )
 
@@ -476,6 +521,7 @@ class Orchestrator:
         preprocess_ms = msg.preprocess_ms
         if preprocess_ms > 0:
             req_state.pipeline_timings["preprocess_ms"] = preprocess_ms
+
         await self.stage_pools[stage_id].submit_initial(
             request_id,
             req_state,
@@ -519,6 +565,7 @@ class Orchestrator:
 
         req_state.streaming.enabled = True
         req_state.stage_submit_ts[stage_id] = _time.time()
+
         await self.stage_pools[stage_id].submit_update(
             request_id,
             req_state,
@@ -1432,6 +1479,7 @@ class Orchestrator:
 
         # Build and submit requests for each input
         for next_input in next_inputs:
+            next_params = _apply_next_input_max_tokens_override(params, next_input)
             # Only AR thinker stages consume encoder mm_features; downstream
             # (talker/code2wav/…) must not see them (avoids encoder-cache misses).
             model_stage = getattr(getattr(next_pool.stage_vllm_config, "model_config", None), "model_stage", None)
@@ -1440,7 +1488,7 @@ class Orchestrator:
                 req_id,
                 next_logical,
                 next_input,
-                params=params,
+                params=next_params,
                 mm_features=mm_features,
                 resumable=next_stage_resumable,
             )
@@ -1480,8 +1528,19 @@ class Orchestrator:
             return
 
         for next_stage_id in range(1, req_state.final_stage_id + 1):
+            if next_stage_id in req_state.stage_submit_ts:
+                logger.debug(
+                    "[Orchestrator] async_chunk prewarm skipped stage-%d for req=%s: already submitted",
+                    next_stage_id,
+                    request_id,
+                )
+                continue
+
             next_pool = self.stage_pools[next_stage_id]
             params = req_state.sampling_params_list[next_stage_id]
+            model_config = getattr(next_pool.stage_vllm_config, "model_config", None)
+            worker_type = getattr(model_config, "worker_type", None)
+            model_stage = getattr(model_config, "model_stage", None)
 
             req_state.stage_submit_ts[next_stage_id] = _time.time()
             _t_submit_start = _time.perf_counter()
@@ -1503,21 +1562,28 @@ class Orchestrator:
 
                 from vllm_omni.distributed.omni_connectors.adapter import compute_talker_prompt_ids_length
 
-                try:
-                    next_prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
-                except Exception:
-                    next_prompt_len = max(1, len(prompt_token_ids))
-
                 original_prompt = req_state.prompt
                 if isinstance(original_prompt, dict):
                     base_input = copy.deepcopy(original_prompt)
                 else:
                     base_input = {}
 
-                base_input["prompt_token_ids"] = [0] * next_prompt_len
+                if worker_type == "generation" or model_stage == "qwen3_tts":
+                    # Codec and Talker stages must wait for the first upstream chunk.
+                    # Dummy AR-style prompt_token_ids trigger invalid decode work.
+                    base_input["prompt_token_ids"] = []
+                else:
+                    try:
+                        next_prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
+                    except Exception:
+                        next_prompt_len = max(1, len(prompt_token_ids))
+                    base_input["prompt_token_ids"] = [0] * next_prompt_len
+
                 base_input["multi_modal_data"] = None
                 base_input["mm_processor_kwargs"] = None
-                downstream_resumable = bool(getattr(stage0_request, "resumable", req_state.streaming.enabled))
+                downstream_resumable = bool(
+                    getattr(stage0_request, "resumable", req_state.streaming.enabled)
+                )
                 request = build_engine_core_request_from_tokens(
                     request_id=request_id,
                     prompt=base_input,
