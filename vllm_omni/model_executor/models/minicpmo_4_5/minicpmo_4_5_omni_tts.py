@@ -385,6 +385,15 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         hidden_size = int(getattr(self, "_hidden_size", 768) or 768)
         return torch.zeros((num_tokens, hidden_size), device=device, dtype=torch.bfloat16)
 
+    def _reset_vocoder_request_state(self) -> None:
+        """Clear mutable Token2Wav state at request boundaries."""
+        if self.audio_tokenizer is None:
+            return
+        if hasattr(self.audio_tokenizer, "stream_cache"):
+            self.audio_tokenizer.stream_cache = None
+        if hasattr(self.audio_tokenizer, "hift_cache_dict"):
+            self.audio_tokenizer.hift_cache_dict = {}
+
     def forward(
         self,
         input_ids=None,
@@ -409,7 +418,11 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             return self._dummy_hidden_states(input_ids, positions, inputs_embeds)
 
         logger.info("4.5 Talker: generating speech for %d tokens", tts_token_ids.shape[0])
-        waveform = self.generate_speech(tts_token_ids, tts_hidden_states)
+        self._reset_vocoder_request_state()
+        try:
+            waveform = self.generate_speech(tts_token_ids, tts_hidden_states)
+        finally:
+            self._reset_vocoder_request_state()
         # Tuple layout: (mel_spec, waveform). 4.5 talker emits only waveform,
         # so mel_spec stays None; the wrapper unpacks in this order and
         # packages the waveform into ``multimodal_outputs["model_outputs"]``.
@@ -418,7 +431,14 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         return None, None
 
     def compute_logits(self, hidden_states, *args, **kwargs):
-        return torch.zeros(1, 2, device=hidden_states.device if isinstance(hidden_states, torch.Tensor) else "cuda")
+        if not isinstance(hidden_states, torch.Tensor):
+            return None
+        return torch.zeros(
+            hidden_states.shape[0],
+            2,
+            device=hidden_states.device,
+            dtype=torch.float32,
+        )
 
     def sample(self, logits, sampling_metadata):
         return None
