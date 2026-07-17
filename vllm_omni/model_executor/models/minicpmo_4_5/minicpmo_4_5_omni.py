@@ -112,6 +112,13 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             if hasattr(self.talker, "init_multi_modal"):
                 self.talker.init_multi_modal(config)
             self.model = self.talker
+            self.has_preprocess = bool(getattr(self.talker, "has_preprocess", False))
+            self.has_postprocess = bool(getattr(self.talker, "has_postprocess", False))
+            self.gpu_resident_buffer_keys = getattr(
+                self.talker,
+                "gpu_resident_buffer_keys",
+                set(),
+            )
 
         else:
             raise ValueError(f"Invalid model stage: {self.model_stage}. Must be one of: 'llm', 'tts'")
@@ -307,6 +314,14 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         # Talker stage: runs MiniCPMTTS + the in-process Token2Wav vocoder and
         # emits the final audio waveform directly.
         if self.model_stage == "tts":
+            if getattr(self.talker, "continuous_batching", False):
+                return self.talker(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **kwargs,
+                )
             if input_ids is not None:
                 num_tokens = input_ids.shape[0]
                 device = input_ids.device
@@ -340,6 +355,9 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             # the runner can route waveforms without falling back to request 0.
             waveforms: list[torch.Tensor] = []
             valid_waveforms = 0
+            request_ids = [
+                str(info.get("request_id", info.get("req_id", index))) for index, info in enumerate(talker_infos)
+            ]
             with torch.inference_mode():
                 for talker_info in talker_infos:
                     talker_result = self.talker(
@@ -358,10 +376,13 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                         valid_waveforms += 1
 
             logger.info(
-                "MiniCPM-o talker batch complete: requests=%d audio_outputs=%d empty_outputs=%d",
+                "MiniCPM-o talker batch complete: requests=%d request_ids=%s "
+                "audio_outputs=%d empty_outputs=%d audio_samples=%s",
                 len(talker_infos),
+                request_ids,
                 valid_waveforms,
                 len(talker_infos) - valid_waveforms,
+                [int(waveform.numel()) for waveform in waveforms],
             )
 
             return OmniOutput(
@@ -370,6 +391,21 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             )
 
         raise ValueError(f"Unsupported model stage: {self.model_stage}")
+
+    def preprocess(self, *args, **kwargs):
+        if self.model_stage != "tts" or not getattr(self.talker, "has_preprocess", False):
+            raise RuntimeError("MiniCPM-o preprocess is only available for the continuous Talker")
+        return self.talker.preprocess(*args, **kwargs)
+
+    def make_omni_output(self, model_outputs, **kwargs):
+        if self.model_stage != "tts" or not getattr(self.talker, "continuous_batching", False):
+            return model_outputs
+        return self.talker.make_omni_output(model_outputs, **kwargs)
+
+    def on_requests_finished(self, finished_req_ids):
+        callback = getattr(self.model, "on_requests_finished", None)
+        if callback is not None:
+            callback(finished_req_ids)
 
     def compute_logits(self, hidden_states: torch.Tensor | OmniOutput) -> torch.Tensor | None:
         # Handle OmniOutput type

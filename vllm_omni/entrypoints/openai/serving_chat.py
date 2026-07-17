@@ -2527,9 +2527,11 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
     ):
         choices: list[ChatCompletionResponseChoice] = []
         final_res = omni_outputs.request_output
-        # OMNI: Access multimodal_output from CompletionOutput (outputs[0]), not from RequestOutput
-        # Reference: examples/offline_inference/qwen3_omni/end2end.py line 421
-        mm_output = final_res.outputs[0].multimodal_output
+        # Sparse streaming stages may emit audio before their terminal token,
+        # so the final CompletionOutput is not guaranteed to carry the
+        # multimodal attribute. OmniRequestOutput owns the compatibility
+        # lookup across completion-, request-, and accumulated output fields.
+        mm_output = omni_outputs.multimodal_output or {}
         audio_data = mm_output.get("audio")
         if isinstance(audio_data, list):
             if not audio_data:
@@ -2541,6 +2543,10 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         else:
             audio_tensor = audio_data
         if audio_tensor is None:
+            if stream:
+                # Sparse PCM stages legitimately produce token-only terminal
+                # updates after their last audio-bearing update.
+                return []
             return self._create_error_response("Audio generation completed but no audio was produced.")
         audio_tensor = audio_tensor.detach().cpu().float().numpy()
 

@@ -9,7 +9,7 @@ Covers ``vllm_omni.model_executor.stage_input_processors.minicpmo_4_5_omni.llm2t
   - both inputs missing -> raises
   - additional_information payload carries the keys the talker expects
     (prompt_embeds, prompt_token_ids, llm_output_token_ids, llm_output_text)
-  - dummy talker prompt ``[BOS, PAD, EOS] = [1, 0, 2]`` (single prefill step)
+  - talker prompt length reserves TTS text + text-eos + audio-bos KV positions
   - MiniCPM-o 4.5 TTS region detection on 151703 / 151704 tokens
   - MiniCPM-o 2.6 fallback detection on 151691 / 151692 when no 4.5 markers
   - No TTS markers present -> no ``tts_token_ids`` / ``tts_hidden_states`` keys
@@ -90,15 +90,19 @@ class TestBasicShape:
         )
         assert len(out) == 2
 
-    def test_talker_prompt_token_ids_dummy_bos_pad_eos(self) -> None:
-        hidden = torch.zeros((2, _HIDDEN_DIM))
+    def test_talker_prompt_reserves_condition_length(self) -> None:
+        hidden = torch.zeros((4, _HIDDEN_DIM))
         out = llm2tts(
-            [_make_thinker_output(prompt_token_ids=[10], output_token_ids=[20], hidden_states=hidden)],
+            [
+                _make_thinker_output(
+                    prompt_token_ids=[10],
+                    output_token_ids=[151703, 20, 151704],
+                    hidden_states=hidden,
+                )
+            ],
             prompt=None,
         )
-        # The talker AR framework needs *some* tokens to do a single prefill;
-        # this is the agreed [BOS, PAD, EOS] minimal payload.
-        assert out[0]["prompt_token_ids"] == [1, 0, 2]
+        assert out[0]["prompt_token_ids"] == [0, 0, 0]
 
     def test_additional_information_carries_thinker_outputs(self) -> None:
         prompt_ids = [10, 11, 12]
@@ -117,6 +121,7 @@ class TestBasicShape:
             prompt=None,
         )
         ai = result[0]["additional_information"]
+        assert ai["request_id"] == "req-0"
         assert ai["prompt_token_ids"] == prompt_ids
         assert ai["llm_output_token_ids"] == out_ids
         assert ai["llm_output_text"] == ["hello"]

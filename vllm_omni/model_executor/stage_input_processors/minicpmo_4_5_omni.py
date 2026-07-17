@@ -12,8 +12,11 @@ from typing import Any
 
 import torch
 from vllm.inputs import TextPrompt
+from vllm.logger import init_logger
 
 from vllm_omni.inputs.data import OmniTokensPrompt
+
+logger = init_logger(__name__)
 
 
 def llm2tts(
@@ -108,6 +111,7 @@ def llm2tts(
             tts_hidden_slice = full_hidden[tts_bos_idx:end_idx]
 
         additional_information = {
+            "request_id": llm_output.request_id,
             "prompt_embeds": prompt_hidden,
             "prompt_token_ids": list(prompt_token_ids),
             "llm_output_token_ids": list(llm_output_ids) if not isinstance(llm_output_ids, list) else llm_output_ids,
@@ -118,11 +122,22 @@ def llm2tts(
         if tts_hidden_slice is not None:
             additional_information["tts_hidden_states"] = tts_hidden_slice
 
-        # Minimal prompt token IDs: the talker's AR framework needs *some* tokens
-        # to do a single prefill step. We use [BOS, PAD, EOS] as a dummy.
+        # The native Talker replaces these token embeddings in preprocess(), but
+        # the prompt length must still reserve exactly one KV position per
+        # conditioning row: TTS text + text_eos + audio_bos.
+        condition_length = (
+            max(
+                int(tts_token_ids_slice.numel()),
+                int(tts_hidden_slice.shape[0]),
+            )
+            + 2
+            if isinstance(tts_token_ids_slice, torch.Tensor)
+            and isinstance(tts_hidden_slice, torch.Tensor)
+            else 1
+        )
         tts_inputs.append(
             OmniTokensPrompt(
-                prompt_token_ids=[1, 0, 2],
+                prompt_token_ids=[0] * condition_length,
                 additional_information=additional_information,
                 multi_modal_data=(
                     multi_modal_data[llm_output.request_id]
@@ -132,5 +147,15 @@ def llm2tts(
                 mm_processor_kwargs=None,
             )
         )
+
+    logger.info(
+        "MiniCPM-o llm2tts batch: requests=%d request_ids=%s tts_token_counts=%s",
+        len(tts_inputs),
+        [llm_output.request_id for llm_output in llm_outputs],
+        [
+            int(tts_input["additional_information"].get("tts_token_ids", torch.empty(0)).numel())
+            for tts_input in tts_inputs
+        ],
+    )
 
     return tts_inputs
