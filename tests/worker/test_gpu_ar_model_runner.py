@@ -58,6 +58,23 @@ def test_sparse_mm_req_ids_requires_sparse_audio_marker():
 
     assert GPUARModelRunner._sparse_mm_req_ids({"meta": {"req_id": ["r1"], "sparse_audio": ["1"]}}) == ["r1"]
     assert GPUARModelRunner._sparse_mm_req_ids({"meta.req_id": ["r1"], "meta.sparse_audio": ["1"]}) == ["r1"]
+    assert GPUARModelRunner._sparse_mm_req_ids({"meta": {"req_id": [], "sparse_audio": ["1"]}}) == []
+
+
+def test_sparse_audio_token_only_step_does_not_route_hidden_state_as_pcm():
+    downstream_req_ids, sparse_mm_index, is_sparse = GPUARModelRunner._resolve_sparse_mm_routing(
+        engine_output_type="audio",
+        req_ids_output_copy=["r1"],
+        downstream_req_ids=["r1"],
+        multimodal_outputs={
+            "model_outputs": [],
+            "meta": {"req_id": [], "sparse_audio": ["1"]},
+        },
+    )
+
+    assert downstream_req_ids == []
+    assert sparse_mm_index == {}
+    assert is_sparse is True
 
 
 def test_runner_assisted_full_attention_metadata_request_is_opt_in():

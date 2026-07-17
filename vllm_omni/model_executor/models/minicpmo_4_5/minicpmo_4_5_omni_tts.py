@@ -43,6 +43,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_TOKEN2WAV_CHUNK_SIZE = 25
+_TOKEN2WAV_LOOKAHEAD = 3
+_TOKEN2WAV_SILENCE_TOKEN = 4218
+
 
 def _restore_weight_norm_weight(weight_g: torch.Tensor, weight_v: torch.Tensor) -> torch.Tensor:
     """Materialize ``weight_norm(..., dim=0)`` checkpoint parameters."""
@@ -487,7 +491,24 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
                 self._vocoder_states.pop(request_id, None)
             else:
                 self._vocoder_states[request_id] = state
-            return torch.as_tensor(np.asarray(waveform).reshape(-1), dtype=torch.float32)
+            waveform_array = np.asarray(waveform).reshape(-1)
+            peak = float(np.max(np.abs(waveform_array))) if waveform_array.size else 0.0
+            saturated = float(np.mean(np.abs(waveform_array) >= 0.999)) if waveform_array.size else 0.0
+            if not np.isfinite(waveform_array).all() or peak > 1.0 or saturated > 0.001:
+                logger.warning(
+                    "MiniCPM-o Token2Wav produced out-of-range audio: "
+                    "request=%s codes=%d samples=%d last_chunk=%s peak=%.6f "
+                    "rms=%.6f saturated=%.6f nonfinite=%d",
+                    request_id,
+                    int(codes.numel()),
+                    int(waveform_array.size),
+                    last_chunk,
+                    peak,
+                    float(np.sqrt(np.nanmean(np.square(waveform_array)))),
+                    saturated,
+                    int((~np.isfinite(waveform_array)).sum()),
+                )
+            return torch.as_tensor(waveform_array, dtype=torch.float32)
         except Exception:
             self._vocoder_states.pop(request_id, None)
             raise
@@ -513,8 +534,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             sample_eligible = [True] * len(infos)
         if len(sample_eligible) != len(infos):
             raise RuntimeError(
-                "MiniCPM-o continuous Talker received "
-                f"{len(sample_eligible)} sampling flags for {len(infos)} requests"
+                f"MiniCPM-o continuous Talker received {len(sample_eligible)} sampling flags for {len(infos)} requests"
             )
 
         stop_rows: list[torch.Tensor] = []
@@ -558,27 +578,34 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
                 "accumulated": codes,
             }
             cursor = int(state.get("vocoder_cursor", 0))
-            pending = int(codes.numel()) - cursor
-            chunk_size = int(
-                getattr(
-                    getattr(self, "_tts_config", None),
-                    "streaming_audio_chunk_size",
-                    50,
+            started = bool(state.get("vocoder_started", False))
+            vocoder_codes: torch.Tensor | None = None
+            next_cursor = cursor
+            if not started and (finished or codes.numel() >= _TOKEN2WAV_CHUNK_SIZE):
+                chunk_end = int(codes.numel()) if finished else _TOKEN2WAV_CHUNK_SIZE
+                prefix = codes.new_full(
+                    (_TOKEN2WAV_LOOKAHEAD,),
+                    _TOKEN2WAV_SILENCE_TOKEN,
                 )
-            )
-            chunk_end: int | None = None
-            if finished and pending > 0:
-                chunk_end = int(codes.numel())
-            elif pending >= chunk_size + 6:
-                chunk_end = cursor + chunk_size
-            if chunk_end is not None:
+                vocoder_codes = torch.cat([prefix, codes[:chunk_end]])
+                next_cursor = max(0, chunk_end - _TOKEN2WAV_LOOKAHEAD)
+            elif started:
+                pending = int(codes.numel()) - cursor
+                if finished and pending > 0:
+                    vocoder_codes = codes[cursor:]
+                    next_cursor = int(codes.numel())
+                elif pending >= _TOKEN2WAV_CHUNK_SIZE + _TOKEN2WAV_LOOKAHEAD:
+                    vocoder_codes = codes[cursor : cursor + _TOKEN2WAV_CHUNK_SIZE + _TOKEN2WAV_LOOKAHEAD]
+                    next_cursor = cursor + _TOKEN2WAV_CHUNK_SIZE
+            if vocoder_codes is not None:
                 try:
                     waveform = self._run_vocoder_chunk(
                         request_id,
-                        codes[cursor:chunk_end],
+                        vocoder_codes,
                         last_chunk=finished,
                     )
-                    state["vocoder_cursor"] = chunk_end
+                    state["vocoder_started"] = True
+                    state["vocoder_cursor"] = next_cursor
                     info["audio_state"] = state
                     if waveform.numel() > 0:
                         audio_by_request[request_id] = waveform
@@ -596,21 +623,17 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             stop_rows.append(hidden.new_tensor([float("-inf"), 0.0] if finished else [0.0, float("-inf")]))
 
         self._batch_stop_logits = torch.stack(stop_rows, dim=0) if stop_rows else hidden.new_empty((0, 2))
-        multimodal_outputs: dict[str, Any] = {}
-        if audio_by_request:
-            ready_ids = list(audio_by_request)
-            multimodal_outputs = {
-                "model_outputs": [
-                    audio_by_request[request_id] for request_id in ready_ids
-                ],
-                "sr": [
-                    torch.tensor(24000, dtype=torch.int32) for _ in ready_ids
-                ],
-                "meta": {
-                    "req_id": ready_ids,
-                    "sparse_audio": ["1"],
-                },
-            }
+        # Keep the sparse marker on token-only steps. Without it, the runner's
+        # regular audio fallback treats the 768-d Talker hidden row as PCM.
+        ready_ids = list(audio_by_request)
+        multimodal_outputs: dict[str, Any] = {
+            "model_outputs": [audio_by_request[request_id] for request_id in ready_ids],
+            "sr": [torch.tensor(24000, dtype=torch.int32) for _ in ready_ids],
+            "meta": {
+                "req_id": ready_ids,
+                "sparse_audio": ["1"],
+            },
+        }
         return OmniOutput(
             text_hidden_states=hidden,
             multimodal_outputs=multimodal_outputs,

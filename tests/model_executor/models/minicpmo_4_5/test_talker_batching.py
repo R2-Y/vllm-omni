@@ -164,7 +164,14 @@ def test_continuous_talker_uses_request_spans_and_keeps_code_state_aligned(
     assert seen == [("req-a", [2.0, 0.0]), ("req-b", [3.0, 0.0])]
     assert infos[0]["audio_codes"]["accumulated"].tolist() == [1, 2]
     assert infos[1]["audio_codes"]["accumulated"].tolist() == [3]
-    assert output.multimodal_outputs == {}
+    assert output.multimodal_outputs == {
+        "model_outputs": [],
+        "sr": [],
+        "meta": {
+            "req_id": [],
+            "sparse_audio": ["1"],
+        },
+    }
     logits = talker.compute_logits(output.text_hidden_states)
     assert logits.argmax(dim=-1).tolist() == [0, 0]
 
@@ -246,6 +253,53 @@ def test_continuous_talker_flushes_vocoder_at_internal_length_limit(mocker) -> N
     assert talker.compute_logits(torch.ones(1, 2)).argmax(dim=-1).tolist() == [1]
 
 
+def test_continuous_talker_preserves_token2wav_lookahead_across_chunks(mocker) -> None:
+    talker = _make_continuous_talker()
+    sample = mocker.patch.object(talker, "_sample_audio_code")
+    run_vocoder = mocker.patch.object(
+        talker,
+        "_run_vocoder_chunk",
+        return_value=torch.ones(4),
+    )
+    info = {
+        "request_id": "req-stream",
+        "audio_state": {"step": 24},
+        "audio_codes": {"accumulated": torch.arange(24)},
+    }
+
+    sample.return_value = torch.tensor(24)
+    talker.make_omni_output(
+        torch.ones(1, 2),
+        model_intermediate_buffer=[info],
+        request_token_spans=[(0, 1)],
+    )
+    first_codes = run_vocoder.call_args.args[1]
+    assert first_codes.tolist() == [4218, 4218, 4218, *range(25)]
+    assert run_vocoder.call_args.kwargs["last_chunk"] is False
+
+    sample.return_value = torch.tensor(49)
+    info["audio_codes"]["accumulated"] = torch.arange(49)
+    talker.make_omni_output(
+        torch.ones(1, 2),
+        model_intermediate_buffer=[info],
+        request_token_spans=[(0, 1)],
+    )
+    second_codes = run_vocoder.call_args.args[1]
+    assert second_codes.tolist() == list(range(22, 50))
+    assert run_vocoder.call_args.kwargs["last_chunk"] is False
+
+    sample.return_value = torch.tensor(7)
+    info["audio_codes"]["accumulated"] = torch.arange(55)
+    talker.make_omni_output(
+        torch.ones(1, 2),
+        model_intermediate_buffer=[info],
+        request_token_spans=[(0, 1)],
+    )
+    final_codes = run_vocoder.call_args.args[1]
+    assert final_codes.tolist() == list(range(47, 55))
+    assert run_vocoder.call_args.kwargs["last_chunk"] is True
+
+
 def test_continuous_talker_cleans_request_generator_after_finish() -> None:
     talker = _make_continuous_talker()
     talker._request_generators["req-done"] = torch.Generator()
@@ -276,9 +330,7 @@ def test_continuous_talker_swaps_vocoder_cache_per_request(mocker) -> None:
     talker = _make_continuous_talker()
     talker.audio_tokenizer = FakeTokenizer()
     talker._vocoder_loaded = True
-    talker.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(model="/tmp/not-a-model")
-    )
+    talker.vllm_config = SimpleNamespace(model_config=SimpleNamespace(model="/tmp/not-a-model"))
     mocker.patch("os.path.exists", return_value=False)
 
     talker._run_vocoder_chunk("req-a", torch.tensor([1, 2]), last_chunk=False)
