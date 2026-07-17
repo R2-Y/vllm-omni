@@ -3219,10 +3219,62 @@ class MiniCPMOAudioEmbeddingItems(DictEmbeddingItems):
         )
 
 
+def _flatten_audio_feature_lens(feature_lens: object) -> list[int]:
+    """Return one integer feature length for every audio chunk."""
+    if isinstance(feature_lens, torch.Tensor):
+        return [int(length) for length in feature_lens.flatten().tolist()]
+    if isinstance(feature_lens, (list, tuple)):
+        flattened: list[int] = []
+        for item in feature_lens:
+            flattened.extend(_flatten_audio_feature_lens(item))
+        return flattened
+    return [int(feature_lens)]
+
+
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    audio_features = hf_inputs.get("audio_features")
+    audio_feature_lens = hf_inputs.get("audio_feature_lens")
+    audio_features_cfg = MultiModalFieldConfig.batched("audio")
+
+    # The HF processor flattens chunks into audio_features while preserving
+    # one vector of chunk lengths per source audio. Group the flattened chunks
+    # back by audio so vLLM's MM cache sees matching item counts.
+    if audio_features is not None and audio_feature_lens is not None:
+        num_features = len(audio_features)
+        num_audios = len(audio_feature_lens)
+        if num_features > num_audios:
+            chunks_per_audio = [
+                int(lens.numel()) if isinstance(lens, torch.Tensor) else 1 for lens in audio_feature_lens
+            ]
+            if sum(chunks_per_audio) != num_features:
+                chunks_per_audio = [
+                    max(int((lens != 0).sum()), 1) if isinstance(lens, torch.Tensor) else 1
+                    for lens in audio_feature_lens
+                ]
+
+            if sum(chunks_per_audio) == num_features:
+                slice_idxs = [0]
+                for num_chunks in chunks_per_audio:
+                    slice_idxs.append(slice_idxs[-1] + num_chunks)
+                audio_features_cfg = MultiModalFieldConfig.flat(
+                    "audio",
+                    [slice(slice_idxs[i], slice_idxs[i + 1]) for i in range(len(chunks_per_audio))],
+                )
+            else:
+                logger.warning(
+                    "MiniCPM-o audio chunk grouping mismatch: features=%d audios=%d chunks_per_audio=%s lens_shapes=%s",
+                    num_features,
+                    num_audios,
+                    chunks_per_audio,
+                    [
+                        tuple(lens.shape) if isinstance(lens, torch.Tensor) else type(lens).__name__
+                        for lens in audio_feature_lens
+                    ],
+                )
+
     return dict(
         **_minicpmv_field_config(hf_inputs),
-        audio_features=MultiModalFieldConfig.batched("audio"),
+        audio_features=audio_features_cfg,
         audio_feature_lens=MultiModalFieldConfig.batched("audio"),
         audio_embeds=MultiModalFieldConfig.batched("audio"),
     )
@@ -3414,12 +3466,40 @@ class MiniCPMO45OmniLLMMultiModalProcessor(BaseMultiModalProcessor[MiniCPMO45Omn
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
-            unpadded_audio_features = [
-                feat[:, :feature_len]
-                for feat, feature_len in zip(
-                    audio_inputs["audio_features"],
-                    audio_inputs["audio_feature_lens"],
+            audio_features = audio_inputs["audio_features"]
+            flat_feature_lens = _flatten_audio_feature_lens(audio_inputs["audio_feature_lens"])
+            if len(audio_features) != len(flat_feature_lens):
+                feature_shapes = [
+                    tuple(feature.shape) if isinstance(feature, torch.Tensor) else type(feature).__name__
+                    for feature in audio_features
+                ]
+                lens_shapes = [
+                    tuple(lens.shape) if isinstance(lens, torch.Tensor) else type(lens).__name__
+                    for lens in audio_inputs["audio_feature_lens"]
+                ]
+                logger.error(
+                    "MiniCPM-o audio preprocessing mismatch: features=%d lengths=%d "
+                    "feature_shapes=%s lens_shapes=%s flat_lengths=%s",
+                    len(audio_features),
+                    len(flat_feature_lens),
+                    feature_shapes,
+                    lens_shapes,
+                    flat_feature_lens,
                 )
+                raise ValueError(
+                    "MiniCPM-o audio preprocessing produced a different number "
+                    f"of chunks ({len(audio_features)}) and feature lengths "
+                    f"({len(flat_feature_lens)})."
+                )
+
+            logger.debug(
+                "MiniCPM-o audio preprocessing: audios=%d chunks=%d flat_lengths=%s",
+                len(parsed_audios),
+                len(audio_features),
+                flat_feature_lens,
+            )
+            unpadded_audio_features = [
+                feat[:, :feature_len] for feat, feature_len in zip(audio_features, flat_feature_lens, strict=True)
             ]
             audio_inputs["audio_features"] = unpadded_audio_features
 

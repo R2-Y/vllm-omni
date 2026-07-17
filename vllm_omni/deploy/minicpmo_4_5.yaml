@@ -34,7 +34,7 @@ stages:
   - stage_id: 1
     # Keep the compatibility default at one request. The batching deploy raises
     # this after enabling request-aligned serial Talker execution.
-    max_num_seqs: 1
+    max_num_seqs: 4
     gpu_memory_utilization: 0.75
     enforce_eager: true
     max_num_batched_tokens: 8192
