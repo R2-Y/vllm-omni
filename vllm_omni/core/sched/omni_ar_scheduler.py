@@ -258,6 +258,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             for nr in scheduler_output.scheduled_new_reqs:
                 req_id = getattr(nr, "req_id", None)
                 request = self.requests.get(req_id) if req_id else None
+                payload = getattr(request, "additional_information", None) if request else None
                 # Build omni entry preserving all base fields
                 omni_nr = OmniNewRequestData(
                     req_id=nr.req_id,
@@ -272,7 +273,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                     # Enrich with omni payloads from the live request object
                     prompt_embeds=(getattr(request, "prompt_embeds", None) if request else None),
                     prompt_is_token_ids=nr.prompt_is_token_ids,
-                    additional_information=(getattr(request, "additional_information", None) if request else None),
+                    additional_information=payload,
                 )
                 new_list.append(omni_nr)
 
@@ -711,9 +712,10 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             session.num_computed_tokens -= session.num_output_placeholders
             session.num_output_placeholders = 0
             session.spec_token_ids = []
-        if self.chunk_transfer_adapter:
+        stage_id = self.vllm_config.model_config.stage_id
+        if self.chunk_transfer_adapter and self.chunk_transfer_adapter.receives_chunks:
             self.chunk_transfer_adapter.requests_num_chunks_sent.pop(session.external_req_id, None)
-            if self.vllm_config.model_config.stage_id != 0:
+            if stage_id != 0:
                 # Downstream async-chunk stages receive real payloads from the
                 # connector. This update only resumes polling for the next segment.
                 self.chunk_transfer_adapter.segment_finished_requests.discard(session.request_id)
@@ -731,6 +733,9 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                 if self.log_stats:
                     session.record_event(EngineCoreEventType.QUEUED)
                 return
+        if stage_id != 0:
+            self._replace_streaming_session(session, update)
+            return
         super()._update_request_as_session(session, update)
 
     def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:

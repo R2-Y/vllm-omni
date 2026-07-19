@@ -1,12 +1,22 @@
-# MiniCPM-o 4.5 opt-in batching deploy: 2-GPU layout.
+# MiniCPM-o 4.5 opt-in batching deploy: 3-GPU split layout.
 #
 # Stage 0 and the Stage-1 Talker AR backbone use vLLM continuous batching.
-# Token2Wav remains in-process in Stage 1 and emits request-scoped PCM chunks.
+# Stage 2 converts the Talker's codec chunks to request-scoped PCM.
 pipeline: minicpmo_4_5
-async_chunk: false
+async_chunk: true
 
 trust_remote_code: true
 enable_prefix_caching: false
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      codec_chunk_frames: 25
+      codec_left_context_frames: 3
 
 stages:
   - stage_id: 0
@@ -33,12 +43,8 @@ stages:
     enforce_eager: true
     max_num_batched_tokens: 8192
     devices: "1"
-    limit_mm_per_prompt:
-      image: 0
-      video: 0
-      audio: 0
-    additional_config:
-      minicpmo_talker_mode: continuous
+    output_connectors:
+      to_stage_2: connector_of_shared_memory
     default_sampling_params:
       temperature: 0.0
       top_p: 1.0
@@ -48,5 +54,22 @@ stages:
       stop_token_ids: [1]
       seed: 42
       detokenize: false
+
+  - stage_id: 2
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.75
+    enforce_eager: true
+    enable_chunked_prefill: false
+    max_num_batched_tokens: 65536
+    max_model_len: 65536
+    devices: "2"
+    input_connectors:
+      from_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      detokenize: true
 
 platforms: {}

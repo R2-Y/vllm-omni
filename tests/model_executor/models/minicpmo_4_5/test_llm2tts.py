@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm_omni.data_entry_keys import OmniPayloadStruct
 from vllm_omni.model_executor.stage_input_processors.minicpmo_4_5_omni import llm2tts
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -77,6 +78,19 @@ class TestInputValidation:
 
 
 class TestBasicShape:
+    def test_reads_multimodal_output_from_request_output(self) -> None:
+        hidden = torch.zeros((4, _HIDDEN_DIM))
+        thinker = _make_thinker_output(
+            prompt_token_ids=[10],
+            output_token_ids=[151703, 20, 151704],
+        )
+        thinker.multimodal_output = OmniPayloadStruct(latent=hidden)
+        del thinker.outputs[0].multimodal_output
+
+        out = llm2tts([thinker], prompt=None)
+
+        assert out[0]["prompt_token_ids"] == [0, 0, 0]
+
     def test_returns_one_entry_per_input(self) -> None:
         hidden = torch.zeros((3, _HIDDEN_DIM))
         out = llm2tts(

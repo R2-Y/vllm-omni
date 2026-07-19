@@ -52,11 +52,11 @@ logger = init_logger(__name__)
 class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP, SupportsMRoPE):
     """MiniCPM-o 4.5 Omni model for conditional generation.
 
-    Two-stage pipeline:
+    Three-stage pipeline:
     - thinker (model_stage="llm"): image / video / audio encoders + 3D
       resampler + the omni LLM that emits text + hidden states.
-    - talker  (model_stage="tts"): MiniCPMTTS + the in-process Token2Wav
-      vocoder that emits the final audio waveform directly.
+    - talker  (model_stage="tts"): native continuous MiniCPMTTS AR that emits
+      codec-token deltas for the separate Code2Wav stage.
     """
 
     @classmethod
@@ -98,8 +98,7 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         elif self.model_stage == "tts":
             self.thinker = None
-            # Initialize talker model — runs MiniCPMTTS + the in-process
-            # Token2Wav vocoder and emits the final audio waveform directly.
+            # The Talker is always the runner-owned continuous codec producer.
             self.talker = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "talker"),
@@ -127,6 +126,8 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self.make_empty_intermediate_tensors = (
             (self.thinker.make_empty_intermediate_tensors)
             if self.model_stage == "llm" and self.thinker is not None
+            else self.talker.make_empty_intermediate_tensors
+            if self.talker is not None
             else lambda: None
         )
 
@@ -241,8 +242,7 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         Workflow:
         1) Thinker (model_stage="llm"): Image / video / audio encoders +
            3D resampler + omni LLM → text + hidden states.
-        2) Talker (model_stage="tts"): MiniCPMTTS + the in-process
-           Token2Wav vocoder → audio waveform (final pipeline output).
+        2) Talker (model_stage="tts"): native MiniCPMTTS AR → codec deltas.
         """
         if self.model_stage == "llm":
             # Normalize to batched inputs if caller provides 1D/2D unbatched tensors
@@ -311,94 +311,26 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                 multimodal_outputs={"latent": text_hidden_states},
             )
 
-        # Talker stage: runs MiniCPMTTS + the in-process Token2Wav vocoder and
-        # emits the final audio waveform directly.
+        # Talker stage: runner-owned native AR only. Waveform generation belongs
+        # to the separate Code2Wav stage.
         if self.model_stage == "tts":
-            if getattr(self.talker, "continuous_batching", False):
-                return self.talker(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **kwargs,
-                )
-            if input_ids is not None:
-                num_tokens = input_ids.shape[0]
-                device = input_ids.device
-            elif inputs_embeds is not None:
-                num_tokens = inputs_embeds.shape[0]
-                device = inputs_embeds.device
-            else:
-                num_tokens = 1
-                device = current_omni_platform.get_torch_device()
-            hidden_dim = self.config.hidden_size if hasattr(self.config, "hidden_size") else 2560
-
-            # Profile/dummy run: both input_ids and inputs_embeds are None.
-            # Note: SupportsMultiModal preprocessing converts input_ids to
-            # inputs_embeds, so input_ids=None alone does NOT indicate a dummy run.
-            if input_ids is None and inputs_embeds is None:
-                dummy_hidden = torch.zeros(num_tokens, hidden_dim, device=device)
-                return OmniOutput(text_hidden_states=dummy_hidden, multimodal_outputs=None)
-
-            runtime_info = kwargs.get("model_intermediate_buffer")
-            if runtime_info is None:
-                runtime_info = kwargs.get("runtime_additional_information")
-            if isinstance(runtime_info, list) and runtime_info:
-                talker_infos = [info if isinstance(info, dict) else {} for info in runtime_info]
-            else:
-                talker_infos = [additional_information or {}]
-
-            dummy_hidden = torch.zeros(num_tokens, hidden_dim, device=device)
-
-            # MiniCPMTTS.generate() is still a blocking single-request API.
-            # Execute each row serially but keep one output slot per request so
-            # the runner can route waveforms without falling back to request 0.
-            waveforms: list[torch.Tensor] = []
-            valid_waveforms = 0
-            request_ids = [
-                str(info.get("request_id", info.get("req_id", index))) for index, info in enumerate(talker_infos)
-            ]
-            with torch.inference_mode():
-                for talker_info in talker_infos:
-                    talker_result = self.talker(
-                        input_ids=input_ids,
-                        positions=positions,
-                        inputs_embeds=inputs_embeds,
-                        additional_information=talker_info,
-                    )
-                    waveform = None
-                    if isinstance(talker_result, tuple) and len(talker_result) == 2:
-                        _, waveform = talker_result
-                    if waveform is None:
-                        waveforms.append(torch.empty(0, dtype=torch.float32))
-                    else:
-                        waveforms.append(torch.as_tensor(waveform, dtype=torch.float32))
-                        valid_waveforms += 1
-
-            logger.info(
-                "MiniCPM-o talker batch complete: requests=%d request_ids=%s "
-                "audio_outputs=%d empty_outputs=%d audio_samples=%s",
-                len(talker_infos),
-                request_ids,
-                valid_waveforms,
-                len(talker_infos) - valid_waveforms,
-                [int(waveform.numel()) for waveform in waveforms],
-            )
-
-            return OmniOutput(
-                text_hidden_states=dummy_hidden,
-                multimodal_outputs={"model_outputs": waveforms},
+            return self.talker(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **kwargs,
             )
 
         raise ValueError(f"Unsupported model stage: {self.model_stage}")
 
     def preprocess(self, *args, **kwargs):
-        if self.model_stage != "tts" or not getattr(self.talker, "has_preprocess", False):
-            raise RuntimeError("MiniCPM-o preprocess is only available for the continuous Talker")
+        if self.model_stage != "tts":
+            raise RuntimeError("MiniCPM-o preprocess is only available for the Talker stage")
         return self.talker.preprocess(*args, **kwargs)
 
     def make_omni_output(self, model_outputs, **kwargs):
-        if self.model_stage != "tts" or not getattr(self.talker, "continuous_batching", False):
+        if self.model_stage != "tts":
             return model_outputs
         return self.talker.make_omni_output(model_outputs, **kwargs)
 
@@ -431,10 +363,7 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         # MiniCPM-o checkpoint prefixes → stage mapping:
         #   thinker: vpm, resampler, llm, apm, audio_projection_layer
-        #   talker:  tts (MiniCPMTTS); the Token2Wav vocoder weights load
-        #            separately inside the talker module from the
-        #            ``assets/token2wav`` subdirectory and do not appear
-        #            in this iterator.
+        #   talker:  tts (native MiniCPMTTS AR codec producer)
         for k, v in weights:
             if k.startswith(("vpm.", "resampler.", "llm.", "apm.", "audio_projection_layer.")):
                 thinker_weights.append((k, v))

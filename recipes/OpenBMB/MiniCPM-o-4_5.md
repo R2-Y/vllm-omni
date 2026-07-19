@@ -16,8 +16,8 @@
 
 Use this recipe as a known-good starting point for serving
 `openbmb/MiniCPM-o-4_5` on vLLM-Omni. MiniCPM-o 4.5 is the omni member
-of the MiniCPM-o family — it pairs a multimodal-understanding thinker
-LLM with a streaming `MiniCPMTTS + Token2Wav` talker so a single
+of the MiniCPM-o family — it runs a multimodal thinker, a streaming
+MiniCPMTTS codec talker, and a separate batched Code2Wav stage so a single
 `/v1/chat/completions` call can return text and 24 kHz speech in one
 shot. The recipe covers three shipped GPU layouts (2 / 3 / 8 GPUs)
 selected via `--deploy-config`.
@@ -36,7 +36,7 @@ selected via `--deploy-config`.
   [`examples/online_serving/minicpmo/`](../../examples/online_serving/minicpmo/)
 - Pipeline / talker source:
   [`vllm_omni/model_executor/models/minicpmo_4_5/`](../../vllm_omni/model_executor/models/minicpmo_4_5/)
-- Stage-input processor (thinker → talker bridge):
+- Stage-input processors (thinker → talker and talker → Code2Wav):
   [`vllm_omni/model_executor/stage_input_processors/minicpmo_4_5_omni.py`](../../vllm_omni/model_executor/stage_input_processors/minicpmo_4_5_omni.py)
 - Upstream model card:
   [`openbmb/MiniCPM-o-4_5`](https://huggingface.co/openbmb/MiniCPM-o-4_5)
@@ -45,16 +45,15 @@ selected via `--deploy-config`.
 
 ## Hardware Support
 
-Three GPU layouts ship with default deploy configs. Pick the layout that
-matches your hardware and pass it via `--deploy-config`; the talker
-(`MiniCPMTTS + Token2Wav`) always lives on its own GPU because of the
-in-process vocoder, and the thinker is the part that scales out via TP.
+Three GPU layouts ship with default deploy configs. Every layout uses the
+same strict three-stage topology. The Talker emits codec chunks only;
+Code2Wav consumes them through a shared-memory async connector.
 
-| Layout | Thinker | Talker + Token2Wav | Typical hardware |
-| --- | --- | --- | --- |
-| 2-GPU (default) | GPU 0 | GPU 1 | 2x A100/H100/H200 80GB |
-| 3-GPU (thinker TP=2) | GPU 0,1 (TP=2) | GPU 2 | 3x mid-tier GPUs |
-| 8x RTX 4090 24GB | GPU 0–3 (TP=4) | GPU 4 | 8x RTX 4090 consumer |
+| Layout | Thinker | Talker | Code2Wav | Typical hardware |
+| --- | --- | --- | --- | --- |
+| 2-GPU (default) | GPU 0 | GPU 1 | GPU 1 | 2x A100/H100/H200 80GB |
+| 3-GPU (thinker TP=2) | GPU 0,1 (TP=2) | GPU 2 | GPU 2 | 3x large-memory GPUs |
+| 8x RTX 4090 24GB | GPU 0–3 (TP=4) | GPU 4 | GPU 5 | 8x RTX 4090 consumer |
 
 ## GPU
 
@@ -62,9 +61,9 @@ in-process vocoder, and the thinker is the part that scales out via TP.
 
 The default
 [`vllm_omni/deploy/minicpmo_4_5.yaml`](../../vllm_omni/deploy/minicpmo_4_5.yaml)
-puts the thinker on GPU 0 (`~70 %` memory, `enforce_eager: true`,
-`max_num_seqs: 1`) and the talker + Token2Wav vocoder on GPU 1
-(`~75 %` memory). This is the recommended starting layout — works on
+puts the thinker on GPU 0 (`~70 %` memory, `enforce_eager: true`) and
+co-locates the codec-only Talker and Code2Wav stages on GPU 1. This is
+the recommended starting layout — works on
 any pair of 80GB-class GPUs (A100, H100, H200) and on most 40GB+
 pairs as long as the thinker model weights fit.
 
@@ -142,25 +141,22 @@ speech output (TTS)"** checkbox on / off.
 
 #### Notes
 
-- Memory budget: thinker weights occupy GPU 0 at `gpu_memory_utilization:
-  0.7`; talker + Token2Wav vocoder share GPU 1 at `0.75`.
+- Memory budget: thinker uses `gpu_memory_utilization: 0.7`; Talker and
+  Code2Wav use separate 0.45 and 0.30 stage budgets on GPU 1.
 - `--trust-remote-code` is required — the HF repo ships a custom
   `MiniCPMO` config / model class.
-- Pin: `enforce_eager: true` on both stages (CUDA graph capture is off
-  by design for the talker's Token2Wav path).
-- Stage 1 (talker) is hard-capped to `max_num_seqs: 1`: the talker
-  only consumes `runtime_additional_information[0]`, so any value > 1
-  makes concurrent requests share request-0's audio. This is the same
-  cap baked into the deploy config.
+- Pin: `enforce_eager: true` on all stages. CUDA graph capture remains
+  outside the currently validated configuration.
+- The default and batching configs support `max_num_seqs: 4`. Talker AR
+  state and Code2Wav caches are request-owned; Code2Wav batches only
+  exact-shape-compatible chunks and does not fall back to serial decode.
 
 ### 3 x GPU (thinker TP=2)
 
 Use
 [`vllm_omni/deploy/minicpmo_4_5_3gpu.yaml`](../../vllm_omni/deploy/minicpmo_4_5_3gpu.yaml)
-when you have a third GPU available and want the thinker on 2-way
-tensor parallel for higher throughput; the talker stays on its own
-GPU (talker has its own in-process Token2Wav vocoder, so co-locating
-it with the thinker risks OOM under load).
+when you have a third GPU available and want the thinker on 2-way tensor
+parallel. Talker and Code2Wav share GPU 2 in this conservative layout.
 
 #### Command
 
@@ -179,8 +175,8 @@ roughly halves under load thanks to TP=2.
 Use
 [`vllm_omni/deploy/minicpmo_4_5_8x4090.yaml`](../../vllm_omni/deploy/minicpmo_4_5_8x4090.yaml)
 on an 8x RTX 4090 host. Thinker uses 4-way TP across GPUs 0–3
-(`~85 %` mem each ≈ 20.4 GiB/card), talker + Token2Wav lives on GPU 4
-(`~90 %` mem). GPUs 5–7 are left free.
+(`~85 %` mem each ≈ 20.4 GiB/card), Talker uses GPU 4, and Code2Wav
+uses GPU 5. GPUs 6–7 are left free.
 
 #### Command
 
@@ -202,8 +198,8 @@ vllm serve openbmb/MiniCPM-o-4_5 --omni \
 
 ## Notes (applies to all layouts)
 
-- **Talker dependency**: the `MiniCPM-o 4.5` talker calls
-  `from stepaudio2 import Token2wav` against the MiniCPM-o-flavored
+- **Code2Wav dependency**: Stage 2 loads `Token2wav` from the
+  MiniCPM-o-flavored
   vocoder (PyPI package `stepaudio2-minicpmo` — NOT the upstream
   `stepfun-ai/Step-Audio2`, whose `Token2wav.__init__` signature
   rejects `n_timesteps`). Install via the published extra:
@@ -235,6 +231,9 @@ vllm serve openbmb/MiniCPM-o-4_5 --omni \
   with this recipe's `--deploy-config` will be rejected at startup
   rather than silently misrouted.
 
-- **Async chunking**: disabled in all three deploy configs
-  (`async_chunk: false`) — the talker batches a single full thinker
-  output, not chunks.
+- **Async chunking**: enabled in all deploy configs. Talker sends
+  25-code chunks with three-code left context to Code2Wav through
+  `SharedMemoryConnector`; terminal chunks flush held lookahead state.
+- **Response choices**: text and audio are separate choices. SDK clients
+  should select the choice whose `message.audio.data` is populated rather
+  than assuming `choices[0]` contains audio.
