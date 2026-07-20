@@ -258,7 +258,6 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             for nr in scheduler_output.scheduled_new_reqs:
                 req_id = getattr(nr, "req_id", None)
                 request = self.requests.get(req_id) if req_id else None
-                payload = getattr(request, "additional_information", None) if request else None
                 # Build omni entry preserving all base fields
                 omni_nr = OmniNewRequestData(
                     req_id=nr.req_id,
@@ -273,7 +272,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                     # Enrich with omni payloads from the live request object
                     prompt_embeds=(getattr(request, "prompt_embeds", None) if request else None),
                     prompt_is_token_ids=nr.prompt_is_token_ids,
-                    additional_information=payload,
+                    additional_information=(getattr(request, "additional_information", None) if request else None),
                 )
                 new_list.append(omni_nr)
 

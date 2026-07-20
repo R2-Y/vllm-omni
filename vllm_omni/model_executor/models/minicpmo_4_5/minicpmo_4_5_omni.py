@@ -187,30 +187,6 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     ) -> torch.Tensor:
         if self.model_stage == "tts":
             return self.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None and is_multimodal is not None:
-            n_ph = int(is_multimodal.sum().item()) if hasattr(is_multimodal, "sum") else -1
-            parts = []
-            total_emb = 0
-            for e in multimodal_embeddings:
-                n = int(e.shape[0]) if hasattr(e, "shape") else -1
-                parts.append(str(n))
-                if n > 0:
-                    total_emb += n
-            if n_ph >= 0 and total_emb != n_ph:
-                logger.error(
-                    "MiniCPM-o MM placeholder/embed mismatch before merge: "
-                    "embeds=%s (sum=%s) placeholders=%s pool_step=%s",
-                    "+".join(parts),
-                    total_emb,
-                    n_ph,
-                    getattr(getattr(self, "config", None), "audio_pool_step", "?"),
-                )
-            else:
-                logger.debug(
-                    "MiniCPM-o MM merge ok: embeds=%s placeholders=%s",
-                    "+".join(parts) if parts else "0",
-                    n_ph,
-                )
         return super().embed_input_ids(input_ids, multimodal_embeddings, is_multimodal=is_multimodal)
 
     def get_multimodal_embeddings(self, **kwargs):

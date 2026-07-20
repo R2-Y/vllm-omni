@@ -11,7 +11,6 @@ Pipeline:
   4. Continuously generate request-aligned discrete audio-code deltas
 """
 
-import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -28,7 +27,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.platforms import current_omni_platform
 
-logger = logging.getLogger(__name__)
+_REPETITION_WINDOW = 16
 
 
 def _restore_weight_norm_weight(weight_g: torch.Tensor, weight_v: torch.Tensor) -> torch.Tensor:
@@ -99,6 +98,8 @@ class _MiniCPMTTSProjector(nn.Module):
 class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
     """Runner-owned MiniCPM-o 4.5 Talker that emits codec tokens only."""
 
+    requires_request_sample_eligibility = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import MiniCPMOConfig
@@ -167,13 +168,6 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             [nn.Linear(int(cfg.hidden_size), int(cfg.num_audio_tokens), bias=False) for _ in range(int(cfg.num_vq))]
         )
         self.make_empty_intermediate_tensors = self.tts_model.make_empty_intermediate_tensors
-        logger.info(
-            "MiniCPM-o native Talker initialized: layers=%d hidden=%d audio_vocab=%d num_vq=%d",
-            int(cfg.num_hidden_layers),
-            int(cfg.hidden_size),
-            int(cfg.num_audio_tokens),
-            int(cfg.num_vq),
-        )
 
     def _build_condition_embeddings(
         self,
@@ -277,7 +271,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             logits,
             history,
             penalty=1.05,
-            window_size=16,
+            window_size=_REPETITION_WINDOW,
         )
         if history.numel() < 50:
             logits[..., self._num_audio_tokens - 1] = float("-inf")
@@ -358,7 +352,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             finished = is_eos or reached_limit
             state["finished"] = finished
             if not is_eos:
-                codes = torch.cat([codes, sampled.reshape(1)])
+                codes = torch.cat([codes[-(_REPETITION_WINDOW - 1) :], sampled.reshape(1)])
                 delta = sampled.reshape(1, 1)
             else:
                 delta = empty_delta
@@ -475,7 +469,6 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             target = stripped
             parameter = direct_params.get(target)
             if parameter is None:
-                logger.debug("MiniCPM-o native Talker skipped weight %s", name)
                 continue
             parameter.data.copy_(tensor.to(device=parameter.device, dtype=parameter.dtype))
             loaded.add(target)
@@ -493,11 +486,6 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             )
         )
         loaded.add("head_code.0.weight")
-        logger.info(
-            "Loaded MiniCPM-o native Talker weights: backbone=%d direct=%d",
-            len(backbone_weights),
-            len(loaded),
-        )
         return loaded
 
     def get_input_embeddings(self, input_ids, multimodal_embeddings=None, **kwargs):

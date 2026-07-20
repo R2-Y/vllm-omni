@@ -2939,17 +2939,10 @@ class MiniCPMO45OmniLLMProcessingInfo(BaseProcessingInfo):
             if not isinstance(hf_processor, MiniCPMOProcessor):
                 hf_processor = MiniCPMOProcessor(
                     image_processor=hf_processor.image_processor,
-                    feature_extractor=getattr(
-                        hf_processor, "feature_extractor", None
-                    )
+                    feature_extractor=getattr(hf_processor, "feature_extractor", None)
                     or getattr(hf_processor, "audio_processor", None),
                     tokenizer=hf_processor.tokenizer,
                     pool_step=self.get_default_audio_pool_step(),
-                )
-                logger.info(
-                    "Wrapped MiniCPM-o HF processor with vendored MiniCPMOProcessor "
-                    "(pool_step=%s)",
-                    hf_processor.pool_step,
                 )
         except Exception as e:
             logger.warning(
@@ -3469,35 +3462,12 @@ class MiniCPMO45OmniLLMMultiModalProcessor(BaseMultiModalProcessor[MiniCPMO45Omn
             audio_features = audio_inputs["audio_features"]
             flat_feature_lens = _flatten_audio_feature_lens(audio_inputs["audio_feature_lens"])
             if len(audio_features) != len(flat_feature_lens):
-                feature_shapes = [
-                    tuple(feature.shape) if isinstance(feature, torch.Tensor) else type(feature).__name__
-                    for feature in audio_features
-                ]
-                lens_shapes = [
-                    tuple(lens.shape) if isinstance(lens, torch.Tensor) else type(lens).__name__
-                    for lens in audio_inputs["audio_feature_lens"]
-                ]
-                logger.error(
-                    "MiniCPM-o audio preprocessing mismatch: features=%d lengths=%d "
-                    "feature_shapes=%s lens_shapes=%s flat_lengths=%s",
-                    len(audio_features),
-                    len(flat_feature_lens),
-                    feature_shapes,
-                    lens_shapes,
-                    flat_feature_lens,
-                )
                 raise ValueError(
                     "MiniCPM-o audio preprocessing produced a different number "
                     f"of chunks ({len(audio_features)}) and feature lengths "
                     f"({len(flat_feature_lens)})."
                 )
 
-            logger.debug(
-                "MiniCPM-o audio preprocessing: audios=%d chunks=%d flat_lengths=%s",
-                len(parsed_audios),
-                len(audio_features),
-                flat_feature_lens,
-            )
             unpadded_audio_features = [
                 feat[:, :feature_len] for feat, feature_len in zip(audio_features, flat_feature_lens, strict=True)
             ]
@@ -4355,35 +4325,17 @@ class MiniCPMO45OmniLLMForConditionalGeneration(nn.Module, SupportsMultiModal, S
 
         # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
-        modality_lens: list[str] = []
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "images":
                 image_embeddings = self._process_vision_input(multimodal_input)
                 multimodal_embeddings += tuple(image_embeddings)
-                modality_lens.append(
-                    f"image={[e.shape[0] for e in image_embeddings]}"
-                )
             if modality == "videos":
                 video_embeddings = self._process_vision_input(multimodal_input)
                 multimodal_embeddings += tuple(video_embeddings)
-                modality_lens.append(
-                    f"video={[e.shape[0] for e in video_embeddings]}"
-                )
             if modality == "audios":
                 audio_embeddings = self._process_audio_input(multimodal_input)
                 multimodal_embeddings += tuple(audio_embeddings)
-                modality_lens.append(
-                    f"audio={[e.shape[0] for e in audio_embeddings]} "
-                    f"(pool_step={getattr(self.config, 'audio_pool_step', '?')})"
-                )
-        if modality_lens:
-            total = sum(int(e.shape[0]) for e in multimodal_embeddings)
-            logger.info(
-                "MiniCPM-o MM embeds: %s total=%s",
-                ", ".join(modality_lens),
-                total,
-            )
         return multimodal_embeddings
 
     def get_input_embeddings(

@@ -1,27 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stage input processor for MiniCPM-o 4.5: Thinker (LLM) -> Talker (TTS).
-
-This is the original vLLM-Omni bridge: it converts the thinker stage's
-hidden states + token ids into the talker stage's prompt payload. The
-talker model itself is adapted from openbmb/MiniCPM-o-4_5 (see the headers
-on vllm_omni/model_executor/models/minicpmo_4_5/*.py).
-"""
+"""MiniCPM-o 4.5 Thinker-to-Talker and Talker-to-Code2Wav bridges."""
 
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
 from vllm.inputs import TextPrompt
-from vllm.logger import init_logger
 
 from vllm_omni.data_entry_keys import CodesStruct, MetaStruct, OmniPayloadStruct
 from vllm_omni.inputs.data import OmniTokensPrompt
 
-logger = init_logger(__name__)
-
 _MINICPMO45_ASYNC_STATE = "_minicpmo45_async_codec_state"
-_MINICPMO45_REGISTRY = "_minicpmo45_async_codec_registry"
+_MINICPMO45_STREAM_RECORD = "_minicpmo45_async_stream_record"
 _MINICPMO45_SILENCE_CODE = 4218
 
 
@@ -121,18 +112,23 @@ def tts2code2wav_async_chunk(
     request_id = str(external_id if external_id is not None else internal_id)
     internal_id = str(internal_id if internal_id is not None else request_id)
 
-    registry = getattr(transfer_manager, _MINICPMO45_REGISTRY, None)
-    if registry is None:
-        registry = {}
-        setattr(transfer_manager, _MINICPMO45_REGISTRY, registry)
-    record = registry.get(request_id)
-    if record is None:
+    request_payload = getattr(transfer_manager, "request_payload", None)
+    if request_payload is None:
+        request_payload = {}
+        transfer_manager.request_payload = request_payload
+    container = request_payload.get(request_id)
+    if not isinstance(container, dict):
+        container = {}
+        request_payload[request_id] = container
+
+    record = container.get(_MINICPMO45_STREAM_RECORD)
+    if not isinstance(record, dict):
         record = {
             "internal_id": internal_id,
             "cache_epoch": 0,
             "retired_internal_ids": set(),
         }
-        registry[request_id] = record
+        container[_MINICPMO45_STREAM_RECORD] = record
     elif internal_id in record["retired_internal_ids"]:
         return None
     elif record["internal_id"] != internal_id:
@@ -146,14 +142,6 @@ def tts2code2wav_async_chunk(
         _drop_codec_state(transfer_manager, request_id)
         return None
 
-    request_payload = getattr(transfer_manager, "request_payload", None)
-    if request_payload is None:
-        request_payload = {}
-        transfer_manager.request_payload = request_payload
-    container = request_payload.get(request_id)
-    if not isinstance(container, dict):
-        container = {}
-        request_payload[request_id] = container
     state = container.get(_MINICPMO45_ASYNC_STATE)
     if not isinstance(state, dict):
         state = {
@@ -210,9 +198,6 @@ def tts2code2wav_async_chunk(
             request_id=request_id,
             chunk_seq=chunk_seq,
             cache_epoch=int(record["cache_epoch"]),
-            codec_start=codec_start,
-            codec_end=codec_end,
-            new_token_count=new_token_count,
             code_flat_numel=len(output_codes),
             codec_chunk_frames=new_token_count,
             codec_left_context_frames=len(context),
@@ -232,28 +217,7 @@ def llm2tts(
     requires_multimodal_data: bool = False,
     streaming_context: Any | None = None,
 ):
-    """Convert thinker stage output to talker stage input for MiniCPMO Omni.
-
-    The signature matches the framework's ``custom_process_input_func`` call
-    convention used by ``StageEngineCoreClientBase.process_engine_inputs``:
-
-        (source_outputs, prompt, requires_multimodal_data, streaming_context)
-
-    ``source_outputs`` is the already-resolved list of upstream engine
-    outputs (one entry per request), so we do not need to look anything up
-    via ``stage_list[source_stage_id].engine_outputs``.
-
-    Extracts from thinker output:
-      - Full hidden states (prompt + generated) for speaker embedding extraction
-      - Prompt token IDs (for finding spk_bos/spk_eos positions)
-      - Generated token IDs (for decoding TTS text)
-
-    The talker model will:
-      1. Find <|spk_bos|>/<|spk_eos|> positions in prompt_token_ids
-      2. Extract speaker embedding from hidden states at those positions
-      3. Decode generated text and extract TTS content
-      4. Run ConditionalChatTTS pipeline
-    """
+    """Build Talker conditioning from resolved Thinker request outputs."""
     del streaming_context  # not used by MiniCPM-o 4.5 turn-taking pipeline
 
     if not source_outputs:
@@ -373,15 +337,5 @@ def llm2tts(
                 mm_processor_kwargs=None,
             )
         )
-
-    logger.info(
-        "MiniCPM-o llm2tts batch: requests=%d request_ids=%s tts_token_counts=%s",
-        len(tts_inputs),
-        [llm_output.request_id for llm_output in llm_outputs],
-        [
-            int(tts_input["additional_information"].get("tts_token_ids", torch.empty(0)).numel())
-            for tts_input in tts_inputs
-        ],
-    )
 
     return tts_inputs
