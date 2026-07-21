@@ -11,6 +11,12 @@ from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_code2wav import (
     MiniCPMO45Code2Wav,
 )
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+def test_code2wav_opts_into_async_omni_output() -> None:
+    assert MiniCPMO45Code2Wav.use_async_omni_output is True
+
 
 class _FakeEncoder(nn.Module):
     def __init__(self):

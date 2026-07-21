@@ -59,6 +59,9 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
       codec-token deltas for the separate Code2Wav stage.
     """
 
+    use_async_omni_output = True
+    omni_pooler_payload_include_hidden = False
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):

@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.outputs import AsyncModelRunnerOutput, make_empty_encoder_model_runner_output
 from vllm.v1.spec_decode.dflash import DFlashProposer
@@ -39,11 +40,18 @@ from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 from vllm_omni.distributed.omni_connectors.utils.config import get_stage_connector_role
 from vllm_omni.outputs import OmniModelRunnerOutput
 from vllm_omni.utils.mm_outputs import partition_payload_list
+from vllm_omni.worker.async_omni_output import (
+    OmniAsyncGPUModelRunnerOutput,
+    get_or_create_payload_copy_stream,
+    snapshot_tensor_payload_to_cpu_async,
+    to_cpu_contiguous,
+)
 from vllm_omni.worker.gpu_ar_model_runner import ExecuteModelState, _ensure_tensor_values
 from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
 from vllm_omni.worker.omni_connector_model_runner_mixin import OmniConnectorModelRunnerMixin
 
 logger = logging.getLogger(__name__)
+_OMNI_CONNECTOR_OUTPUT_UNSET = object()
 
 
 class GPUGenerationModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin):
@@ -77,6 +85,69 @@ class GPUGenerationModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin
                 vllm_config=self.vllm_config,
                 model_config=self.model_config,
             )
+
+    def _should_use_async_omni_output(self, *, accumulates_full_payload: bool | None = None) -> bool:
+        """Whether immutable output snapshots can be built off-thread."""
+        if not self.use_async_scheduling or self.speculative_config is not None:
+            return False
+        if torch.device(self.device).type != "cuda":
+            return False
+        if not bool(getattr(self.model_config, "async_chunk", False)):
+            return False
+        if not bool(getattr(self.model, "use_async_omni_output", False)):
+            return False
+        # Full-payload accumulation mutates request state and therefore must
+        # remain on the runner thread.
+        if accumulates_full_payload is None:
+            accumulates_full_payload = self._should_accumulate_full_payload_output()
+        return not accumulates_full_payload
+
+    @staticmethod
+    def _build_per_request_payloads(multimodal_outputs_raw: object, num_reqs: int) -> list[dict[str, object]]:
+        """Convert a CPU-owned model payload into request-aligned rows."""
+        per_req_payloads: list[dict[str, object]] = []
+        if isinstance(multimodal_outputs_raw, torch.Tensor):
+            if multimodal_outputs_raw.shape[0] != num_reqs:
+                raise ValueError(
+                    "Tensor multimodal output batch does not match requests: "
+                    f"outputs={multimodal_outputs_raw.shape[0]} requests={num_reqs}"
+                )
+            for row in multimodal_outputs_raw:
+                per_req_payloads.append({"model_outputs": to_cpu_contiguous(row)})
+        elif isinstance(multimodal_outputs_raw, list):
+            if len(multimodal_outputs_raw) != num_reqs:
+                raise ValueError(
+                    "List multimodal output batch does not match requests: "
+                    f"outputs={len(multimodal_outputs_raw)} requests={num_reqs}"
+                )
+            for out in multimodal_outputs_raw:
+                per_req_payloads.append({"model_outputs": to_cpu_contiguous(out) if out is not None else None})
+        elif isinstance(multimodal_outputs_raw, Mapping):
+            shared_tensors = {
+                key: to_cpu_contiguous(out)
+                for key, out in multimodal_outputs_raw.items()
+                if isinstance(out, torch.Tensor)
+            }
+            for index in range(num_reqs):
+                payload: dict[str, object] = {}
+                for key, out in multimodal_outputs_raw.items():
+                    if isinstance(out, list):
+                        if len(out) != num_reqs:
+                            raise ValueError(
+                                f"Multimodal output list for key '{key}' has length {len(out)} "
+                                f"but expected {num_reqs} (one entry per request)."
+                            )
+                        value = out[index]
+                        if value is not None:
+                            payload[key] = to_cpu_contiguous(value)
+                    elif key in shared_tensors:
+                        payload[key] = shared_tensors[key]
+                    elif out is not None:
+                        logger.warning("Unsupported multimodal output type for key '%s': %s", key, type(out))
+                per_req_payloads.append(_ensure_tensor_values(payload))
+        else:
+            raise RuntimeError(f"Unsupported generation output type: {type(multimodal_outputs_raw).__name__}")
+        return per_req_payloads
 
     def _update_request_states(self, scheduler_output: SchedulerOutput):
         # remove requests
@@ -431,90 +502,101 @@ class GPUGenerationModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin
         if self.speculative_config is not None:
             self.finalize_kv_connector()
 
-        # Build per-request multimodal_outputs list (dedicated channel).
-        # pooler_output is no longer used for multimodal data.
-        per_req_payloads: list[dict[str, object]] = []
-        if isinstance(multimodal_outputs_raw, torch.Tensor):
-            assert multimodal_outputs_raw.shape[0] == 1, (
-                "model should return a single tensor, to return multiple tensors, use a dict"
-            )
-            assert multimodal_outputs_raw.shape[0] == self.input_batch.num_reqs
-            for i in range(self.input_batch.num_reqs):
-                per_req_payloads.append({"model_outputs": multimodal_outputs_raw[i].detach().to("cpu").contiguous()})
-        elif isinstance(multimodal_outputs_raw, list):
-            assert len(multimodal_outputs_raw) == 1, (
-                "model should return a single list, to return multiple lists, use a dict"
-            )
-            for out in multimodal_outputs_raw:
-                per_req_payloads.append(
-                    {"model_outputs": out.detach().to("cpu").contiguous() if out is not None else None}
-                )
-        elif isinstance(multimodal_outputs_raw, Mapping):
-            num_reqs = self.input_batch.num_reqs
-            for i in range(num_reqs):
-                mm_payload = {}
-                for key, out in multimodal_outputs_raw.items():
-                    if isinstance(out, list):
-                        if len(out) != num_reqs:
-                            raise ValueError(
-                                f"Multimodal output list for key '{key}' has length {len(out)} "
-                                f"but expected {num_reqs} (one entry per request)."
-                            )
-                        mm_payload[key] = out[i].detach().to("cpu").contiguous()
-                    elif isinstance(out, torch.Tensor):
-                        mm_payload[key] = out.detach().to("cpu").contiguous()
-                    else:
-                        logger.warning(f"Unsupported multimodal output type for key '{key}': {type(out)}")
-                per_req_payloads.append(_ensure_tensor_values(mm_payload))
-        else:
-            raise RuntimeError("Unsupported diffusion output type")
-
-        if self._async_chunk:
-            inter_stage_outputs, multimodal_outputs = partition_payload_list(per_req_payloads)
-        else:
-            # See gpu_ar_model_runner: non-async-chunk ships the full payload to the next
-            # stage; #4527's (None, per_req_payloads) starved the downstream stage. (PR #4792)
-            inter_stage_outputs, multimodal_outputs = per_req_payloads, per_req_payloads
-
-        # [Omni] Copy req_id mappings to avoid async scheduling mutation.
+        # Snapshot every mutable runner value before the next scheduler step.
         req_ids_output_copy = self.input_batch.req_ids.copy()
         req_id_to_index_output_copy = self.input_batch.req_id_to_index.copy()
         routed_experts_lists = None
         if self.routed_experts_initialized:
             routed_experts_lists = self._omni_extract_routed_experts(scheduler_output)
-        if inter_stage_outputs and self._should_accumulate_full_payload_output():
-            for i, rid in enumerate(req_ids_output_copy):
-                req_state = self.requests.get(rid)
-                if req_state is not None and inter_stage_outputs[i]:
-                    self.accumulate_full_payload_output(rid, inter_stage_outputs[i], req_state)
-
-        output = OmniModelRunnerOutput(
-            req_ids=req_ids_output_copy,
-            req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=[],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=None,
-            multimodal_outputs=multimodal_outputs,
-            inter_stage_outputs=inter_stage_outputs,
-            kv_connector_output=kv_connector_output,
-            num_nans_in_logits={},
-            cudagraph_stats=cudagraph_stats,
-            ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
+        supports_mm_inputs = self.supports_mm_inputs
+        async_chunk = self._async_chunk
+        num_reqs = self.input_batch.num_reqs
+        accumulate_full_payload = self._should_accumulate_full_payload_output()
+        use_async_omni_output = self._should_use_async_omni_output(accumulates_full_payload=accumulate_full_payload)
+        omni_connector_output = (
+            self.get_omni_connector_output() if use_async_omni_output else _OMNI_CONNECTOR_OUTPUT_UNSET
         )
-        output.omni_connector_output = self.get_omni_connector_output()
-        output.routed_experts = routed_experts_lists
+        payload_builder = type(self)._build_per_request_payloads
+        request_states = self.requests if accumulate_full_payload else None
+        accumulate_output = self.accumulate_full_payload_output if accumulate_full_payload else None
+        connector_output_getter = None if use_async_omni_output else self.get_omni_connector_output
 
-        if not self.use_async_scheduling:
-            return output
+        async_payload_snapshot = None
+        if use_async_omni_output:
+            with record_function_or_nullcontext("omni_async_output:generation_snapshot_cpu_payload"):
+                async_payload_snapshot = snapshot_tensor_payload_to_cpu_async(
+                    multimodal_outputs_raw,
+                    copy_stream=get_or_create_payload_copy_stream(self),
+                    pin_memory=is_pin_memory_available(),
+                )
+                multimodal_outputs_raw = async_payload_snapshot.payload
 
+        def output_builder() -> OmniModelRunnerOutput:
+            if async_payload_snapshot is not None:
+                with record_function_or_nullcontext("omni_async_output:generation_wait_cpu_payload"):
+                    async_payload_snapshot.wait()
+            with record_function_or_nullcontext("omni_output_builder:generation_total"):
+                per_req_payloads = payload_builder(multimodal_outputs_raw, num_reqs)
+                if async_chunk:
+                    inter_stage_outputs, multimodal_outputs = partition_payload_list(per_req_payloads)
+                else:
+                    # Non-async-chunk sends the full payload through both channels.
+                    inter_stage_outputs, multimodal_outputs = per_req_payloads, per_req_payloads
+
+                if inter_stage_outputs and accumulate_full_payload:
+                    assert request_states is not None and accumulate_output is not None
+                    for index, request_id in enumerate(req_ids_output_copy):
+                        request_state = request_states.get(request_id)
+                        if request_state is not None and inter_stage_outputs[index]:
+                            accumulate_output(
+                                request_id,
+                                inter_stage_outputs[index],
+                                request_state,
+                            )
+
+                output = OmniModelRunnerOutput(
+                    req_ids=req_ids_output_copy,
+                    req_id_to_index=req_id_to_index_output_copy,
+                    sampled_token_ids=[],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=None,
+                    multimodal_outputs=multimodal_outputs,
+                    inter_stage_outputs=inter_stage_outputs,
+                    kv_connector_output=kv_connector_output,
+                    num_nans_in_logits={},
+                    cudagraph_stats=cudagraph_stats,
+                    ec_connector_output=ec_connector_output if supports_mm_inputs else None,
+                )
+                resolved_connector_output = omni_connector_output
+                if resolved_connector_output is _OMNI_CONNECTOR_OUTPUT_UNSET:
+                    assert connector_output_getter is not None
+                    resolved_connector_output = connector_output_getter()
+                output.omni_connector_output = resolved_connector_output
+                output.routed_experts = routed_experts_lists
+                return output
+
+        if not use_async_omni_output:
+            output = output_builder()
+            if not self.use_async_scheduling:
+                return output
+
+        async_output_kwargs = {
+            "sampled_token_ids": torch.tensor([], device=self.device),
+            "invalid_req_indices": [],
+            "async_output_copy_stream": self.async_output_copy_stream,
+            "vocab_size": self.input_batch.vocab_size,
+            "logprobs_tensors": None,
+        }
+        if use_async_omni_output:
+            return OmniAsyncGPUModelRunnerOutput(
+                model_runner_output_builder=output_builder,
+                cuda_device=self.device,
+                **async_output_kwargs,
+            )
         return AsyncGPUModelRunnerOutput(
             model_runner_output=output,
-            sampled_token_ids=torch.tensor([], device=self.device),
-            invalid_req_indices=[],
-            async_output_copy_stream=self.async_output_copy_stream,
-            vocab_size=self.input_batch.vocab_size,
-            logprobs_tensors=None,
+            **async_output_kwargs,
         )
 
     def _run_generation_model(

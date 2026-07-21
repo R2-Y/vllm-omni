@@ -47,6 +47,11 @@ def test_wrapper_always_delegates_talker_to_native_ar_path() -> None:
     assert model.talker.forward_kwargs["model_intermediate_buffer"][0]["request_id"] == "req"
 
 
+def test_wrapper_opts_into_async_output_with_typed_payload_only() -> None:
+    assert MiniCPMO45OmniForConditionalGeneration.use_async_omni_output is True
+    assert MiniCPMO45OmniForConditionalGeneration.omni_pooler_payload_include_hidden is False
+
+
 def _make_talker() -> MiniCPMO45OmniTTSForConditionalGeneration:
     talker = MiniCPMO45OmniTTSForConditionalGeneration.__new__(MiniCPMO45OmniTTSForConditionalGeneration)
     nn.Module.__init__(talker)
@@ -72,7 +77,8 @@ def test_talker_emits_request_aligned_codec_deltas_after_compaction(mocker) -> N
     talker = _make_talker()
     seen: list[tuple[str, list[float], list[int]]] = []
 
-    def sample(hidden, history, request_id):
+    def sample(hidden, history, request_id, step):
+        del step
         seen.append((request_id, hidden.reshape(-1).tolist(), history.tolist()))
         return torch.tensor(2 if request_id == "req-a" else 3)
 

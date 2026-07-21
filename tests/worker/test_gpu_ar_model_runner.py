@@ -250,6 +250,7 @@ def _make_async_output_runner(engine_output_type: str = "audio"):
     runner.supports_mm_inputs = False
     runner.routed_experts_initialized = False
     runner.model = SimpleNamespace(has_postprocess=False)
+    runner.device = torch.device("cuda")
     runner.model_intermediate_buffer = {}
     runner.input_batch = SimpleNamespace(
         req_ids=["mutated"],
@@ -258,14 +259,14 @@ def _make_async_output_runner(engine_output_type: str = "audio"):
     return runner
 
 
-def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monkeypatch):
+def test_build_omni_output_uses_captured_connector_snapshot(monkeypatch):
     runner = _make_async_output_runner()
     events = []
 
     monkeypatch.setattr(
         GPUARModelRunner,
         "_resolve_pooler_payload_req_ids",
-        lambda self, req_ids: ("audio", req_ids),
+        lambda self, req_ids: (_ for _ in ()).throw(AssertionError("live routing state was read")),
     )
     monkeypatch.setattr(GPUARModelRunner, "_should_accumulate_full_payload_output", lambda self: True)
     monkeypatch.setattr(
@@ -276,7 +277,7 @@ def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monke
     monkeypatch.setattr(
         GPUARModelRunner,
         "get_omni_connector_output",
-        lambda self: events.append("connector") or "connector-output",
+        lambda self: (_ for _ in ()).throw(AssertionError("live connector state was read")),
     )
 
     output = GPUARModelRunner._build_omni_model_runner_output_from_snapshot(
@@ -300,6 +301,8 @@ def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monke
         kv_extracted_req_ids=["r2"],
         num_scheduled_tokens_np=torch.tensor([1, 2], dtype=torch.int32).numpy(),
         query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.long),
+        omni_connector_output="connector-output",
+        routing_snapshot=("audio", ["r1", "r2"], {}, False),
     )
 
     assert output.req_ids == ["r1", "r2"]
@@ -309,7 +312,7 @@ def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monke
     assert output.multimodal_outputs is None
     assert output.kv_extracted_req_ids == ["r2"]
     assert output.omni_connector_output == "connector-output"
-    assert events == ["accumulate:r1", "accumulate:r2", "connector"]
+    assert events == ["accumulate:r1", "accumulate:r2"]
 
 
 def test_build_omni_output_copies_hidden_for_partial_downstream_batch(monkeypatch):
@@ -422,6 +425,13 @@ def test_async_omni_output_guard_requires_safe_conditions():
 
     runner.model.eager_omni_postprocess_before_async_output = True
     assert GPUARModelRunner._should_use_async_omni_output(runner)
+
+    runner._should_accumulate_full_payload_output = lambda: True
+    assert not GPUARModelRunner._should_use_async_omni_output(runner)
+
+    runner._should_accumulate_full_payload_output = lambda: False
+    runner.device = torch.device("cpu")
+    assert not GPUARModelRunner._should_use_async_omni_output(runner)
 
 
 def test_build_omni_output_skips_hidden_when_model_opts_out(monkeypatch):
