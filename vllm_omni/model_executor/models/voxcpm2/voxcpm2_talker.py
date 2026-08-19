@@ -36,6 +36,7 @@ from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.platforms import current_omni_platform
 from vllm_omni.utils.speaker_cache import (
@@ -865,7 +866,12 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         self._side_dtype = self._tts.fusion_concat_proj.weight.dtype
         self._patch_size = self._tts.patch_size
         self._feat_dim = self._tts.feat_dim
-        self._sample_rate = getattr(self.config, "sample_rate", 48000)
+        self._sample_rate = get_required_config_field(
+            self.config,
+            "sample_rate",
+            expected_type=int,
+            model="voxcpm2",
+        )
 
         # base_lm/residual_lm in native tts_model duplicate self.model and
         # self.residual_model: copy residual weights over, drop both submodules.
@@ -887,7 +893,12 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         self._enable_torch_compile = current_omni_platform.supports_torch_inductor()
         self._compile_vae = self._enable_torch_compile
         self._max_decode_steps = 2000
-        self._max_batch_size = getattr(vllm_config.scheduler_config, "max_num_seqs", 4)
+        self._max_batch_size = get_required_config_field(
+            vllm_config.scheduler_config,
+            "max_num_seqs",
+            expected_type=int,
+            model="voxcpm2",
+        )
 
         # Speaker cache for ref_audio_feat across requests
         self._speaker_cache = get_speaker_cache()

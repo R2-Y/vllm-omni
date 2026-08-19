@@ -10,6 +10,12 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
+    get_required_config_field,
+    pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
+)
+from vllm_omni.model_executor.models.indextts2.configuration_indextts2 import (
+    IndexTTS2Config,
 )
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.indextts2"
@@ -30,7 +36,6 @@ INDEXTTS2_PIPELINE = PipelineConfig(
             custom_process_next_stage_input_func=f"{_PROC}.talker2s2mel_full_payload",
             sampling_constraints={
                 "detokenize": False,
-                "stop_token_ids": [8193],
             },
         ),
         StagePipelineConfig(
@@ -66,7 +71,6 @@ INDEXTTS25_PIPELINE = PipelineConfig(
             custom_process_next_stage_input_func=f"{_PROC}.talker2s2mel_full_payload",
             sampling_constraints={
                 "detokenize": False,
-                "stop_token_ids": [8193],
             },
         ),
         StagePipelineConfig(
@@ -84,3 +88,34 @@ INDEXTTS25_PIPELINE = PipelineConfig(
         ),
     ),
 )
+
+
+@pipeline_cfg_resolver(
+    config_type=IndexTTS2Config,
+    default_pipeline_config=INDEXTTS2_PIPELINE,
+)
+def resolve_indextts2_pipeline(hf_config: IndexTTS2Config) -> PipelineConfig:
+    """Bind both IndexTTS variants to the GPT schema's stop token."""
+    stop_token_id = get_required_config_field(
+        hf_config,
+        "gpt.stop_mel_token",
+        expected_type=int,
+        model=hf_config.model_type,
+    )
+    number_mel_codes = get_required_config_field(
+        hf_config,
+        "gpt.number_mel_codes",
+        expected_type=int,
+        model=hf_config.model_type,
+    )
+    if stop_token_id >= number_mel_codes:
+        raise ValueError(
+            f"Model {hf_config.model_type!r} requires gpt.stop_mel_token below "
+            f"gpt.number_mel_codes; got {stop_token_id} >= {number_mel_codes}"
+        )
+    pipeline = INDEXTTS25_PIPELINE if hf_config.model_type == "indextts2_5" else INDEXTTS2_PIPELINE
+    return replace_stage_sampling_constraints(
+        pipeline,
+        stage_id=0,
+        updates={"stop_token_ids": [stop_token_id]},
+    )

@@ -7,7 +7,12 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
+    get_required_config_field,
+    pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
 )
+
+from .configuration_moss_tts import MossTTSLocalConfig
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.moss_tts"
 
@@ -99,7 +104,6 @@ MOSS_TTS_LOCAL_PIPELINE = PipelineConfig(
             async_chunk_process_next_stage_input_func=(f"{_PROC}.talker2codec_raw_async_chunk"),
             sampling_constraints={
                 "detokenize": False,
-                "stop_token_ids": [151645],
             },
         ),
         StagePipelineConfig(
@@ -118,10 +122,33 @@ MOSS_TTS_LOCAL_PIPELINE = PipelineConfig(
     ),
 )
 
+
+@pipeline_cfg_resolver(
+    config_type=MossTTSLocalConfig,
+    default_pipeline_config=MOSS_TTS_LOCAL_PIPELINE,
+)
+def resolve_moss_tts_local_pipeline(hf_config: MossTTSLocalConfig) -> PipelineConfig:
+    stop_token_id = get_required_config_field(
+        hf_config,
+        "im_end_token_id",
+        expected_type=int,
+        model="moss_tts_local",
+    )
+    return replace_stage_sampling_constraints(
+        MOSS_TTS_LOCAL_PIPELINE,
+        stage_id=0,
+        updates={"stop_token_ids": [stop_token_id]},
+    )
+
 # The pipeline config is otherwise the same for all variants; the per-variant
 # differences (n_vq, backbone size, generation strategy) are encoded in the
 # HF config.json and the deploy YAML. Realtime and Local are split out because
 # they have different talker architectures from the delay variant
 # (MossTTSRealtime / MossTTSLocalModel vs MossTTSDelayModel).
 
-__all__ = ["MOSS_TTS_PIPELINE", "MOSS_TTS_REALTIME_PIPELINE", "MOSS_TTS_LOCAL_PIPELINE"]
+__all__ = [
+    "MOSS_TTS_PIPELINE",
+    "MOSS_TTS_REALTIME_PIPELINE",
+    "MOSS_TTS_LOCAL_PIPELINE",
+    "resolve_moss_tts_local_pipeline",
+]

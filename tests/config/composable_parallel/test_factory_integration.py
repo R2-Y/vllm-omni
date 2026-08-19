@@ -20,7 +20,7 @@ from vllm_omni.config.composable_parallel import (
     apply_strategy_specs,
 )
 from vllm_omni.config.config_factory import StageConfigFactory
-from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
+from vllm_omni.config.pipeline_registry import resolve_pipeline_config
 from vllm_omni.config.stage_config import load_deploy_config, merge_pipeline_deploy
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -37,7 +37,8 @@ def _stage_replica(size: int, policy: str = "round_robin") -> StrategySpec:
 
 
 def _qwen_stages():
-    pipeline = OMNI_PIPELINES["qwen2_5_omni"]
+    pipeline = resolve_pipeline_config("qwen2_5_omni")
+    assert pipeline is not None
     deploy = load_deploy_config(_DEPLOY)
     return merge_pipeline_deploy(pipeline, deploy)
 
@@ -98,7 +99,8 @@ def test_device_check_survives_cli_override():
     # Strategy replicates the talker (1-GPU template -> valid at apply time),
     # but a CLI --stage_1_devices with 3 ids must NOT slip past the device
     # guard: effective world=1, replicas=2 admits only 1 or 2 device ids.
-    pipeline_cfg = OMNI_PIPELINES["qwen2_5_omni"]
+    pipeline_cfg = resolve_pipeline_config("qwen2_5_omni")
+    assert pipeline_cfg is not None
     with pytest.raises(StrategyApplyError):
         StageConfigFactory._create_legacy_from_registry(
             pipeline_cfg,
@@ -124,7 +126,8 @@ def test_cli_overrides_strategy_with_warning():
     handler = _Capture(level=logging.WARNING)
     log.addHandler(handler)
     try:
-        pipeline_cfg = OMNI_PIPELINES["qwen2_5_omni"]
+        pipeline_cfg = resolve_pipeline_config("qwen2_5_omni")
+        assert pipeline_cfg is not None
         stages, _ = StageConfigFactory._create_legacy_from_registry(
             pipeline_cfg,
             cli_overrides={"stage_1_num_replicas": 3},

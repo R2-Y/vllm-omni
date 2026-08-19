@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from transformers.utils.hub import cached_file
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.diffusion.model_loader.hub_prefetch import _repo_prefetch_lock
 
 logger = init_logger(__name__)
@@ -163,9 +164,15 @@ def load_semantic_codec(
     from .utils.maskgct.repcodec_model import RepCodec
 
     codec = RepCodec(
-        codebook_size=config.get("codebook_size", 8192),
-        hidden_size=config.get("hidden_size", 1024),
-        codebook_dim=config.get("codebook_dim", 8),
+        codebook_size=get_required_config_field(
+            config, "codebook_size", expected_type=int, model="indextts2"
+        ),
+        hidden_size=get_required_config_field(
+            config, "hidden_size", expected_type=int, model="indextts2"
+        ),
+        codebook_dim=get_required_config_field(
+            config, "codebook_dim", expected_type=int, model="indextts2"
+        ),
     )
     checkpoint_name = checkpoint_name or "semantic_codec.pth"
     ckpt_path = resolve_model_file(model_path, checkpoint_name)

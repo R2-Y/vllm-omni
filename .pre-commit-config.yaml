@@ -71,6 +71,13 @@ repos:
       # pre-commit hides output from passing hooks unless the hook is verbose.
       verbose: true
 
+    - id: check-model-executor-hardcodes
+      name: Prevent new model-executor hardcodes
+      entry: python tools/pre_commit/check_model_executor_hardcodes.py
+      language: python
+      pass_filenames: false
+      files: ^(vllm_omni/model_executor/(models|stage_input_processors)/.*\.py|tools/pre_commit/(check_model_executor_hardcodes\.py|model_executor_hardcodes_baseline\.json))$
+
     # Keep `suggestion` last
     - id: suggestion
       name: Suggestion

@@ -225,7 +225,7 @@ def extract_prompt_speech_token(
         audio = audio[0]
 
     audio_np = audio.cpu().numpy()
-    pooling_kernel_size = getattr(model.config, "pooling_kernel_size", 1)
+    pooling_kernel_size = model.config.pooling_kernel_size
     stride = model.conv1.stride[0] * model.conv2.stride[0] * pooling_kernel_size * feature_extractor.hop_length
 
     all_tokens: list[int] = []

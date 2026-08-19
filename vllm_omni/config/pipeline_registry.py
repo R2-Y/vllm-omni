@@ -35,29 +35,31 @@ from vllm_omni.config.stage_config import (
 )
 from vllm_omni.diffusion.models.pi0_pipeline_config import PI0_PIPELINE
 from vllm_omni.model_executor.models.audex.pipeline import (
-    AUDEX_S2S_PIPELINE,
     AUDEX_THINKER_ONLY_PIPELINE,
-    AUDEX_TTA_PIPELINE,
-    AUDEX_TTS_PIPELINE,
+    resolve_audex_s2s_pipeline,
+    resolve_audex_tta_pipeline,
+    resolve_audex_tts_pipeline,
 )
-from vllm_omni.model_executor.models.aura_omni.pipeline import AURA_OMNI_PIPELINE
+from vllm_omni.model_executor.models.aura_omni.pipeline import (
+    resolve_aura_omni_pipeline,
+)
 from vllm_omni.model_executor.models.bagel.pipeline import (
     BAGEL_PIPELINE,
     BAGEL_SINGLE_STAGE_PIPELINE,
     BAGEL_THINK_PIPELINE,
 )
-from vllm_omni.model_executor.models.cosyvoice3.pipeline import COSYVOICE3_PIPELINE
-from vllm_omni.model_executor.models.covo_audio.pipeline import COVO_AUDIO_PIPELINE
+from vllm_omni.model_executor.models.cosyvoice3.pipeline import resolve_cosyvoice3_pipeline
+from vllm_omni.model_executor.models.covo_audio.pipeline import resolve_covo_audio_pipeline
 from vllm_omni.model_executor.models.dots_tts.pipeline import DOTS_TTS_PIPELINE
 from vllm_omni.model_executor.models.dreamzero.pipeline import DREAMZERO_PIPELINE
 from vllm_omni.model_executor.models.dynin_omni.pipeline import DYNIN_OMNI_PIPELINE
-from vllm_omni.model_executor.models.fish_speech.pipeline import FISH_SPEECH_PIPELINE
+from vllm_omni.model_executor.models.fish_speech.pipeline import resolve_fish_speech_pipeline
 from vllm_omni.model_executor.models.gepard.pipeline import GEPARD_PIPELINE
 from vllm_omni.model_executor.models.glm_image.pipeline import GLM_IMAGE_PIPELINE
-from vllm_omni.model_executor.models.glm_tts.pipeline import GLM_TTS_PIPELINE
+from vllm_omni.model_executor.models.glm_tts.pipeline import resolve_glm_tts_pipeline
 from vllm_omni.model_executor.models.gr00t.pipeline import GR00T_N1D7_PIPELINE
-from vllm_omni.model_executor.models.higgs_audio_v2.pipeline import HIGGS_AUDIO_V2_PIPELINE
-from vllm_omni.model_executor.models.higgs_audio_v3.pipeline import HIGGS_AUDIO_V3_PIPELINE
+from vllm_omni.model_executor.models.higgs_audio_v2.pipeline import resolve_higgs_audio_v2_pipeline
+from vllm_omni.model_executor.models.higgs_audio_v3.pipeline import resolve_higgs_audio_v3_pipeline
 from vllm_omni.model_executor.models.hunyuan_image3.pipeline import (
     HUNYUAN_IMAGE3_AR_PIPELINE,
     HUNYUAN_IMAGE3_DIT_PIPELINE,
@@ -67,13 +69,14 @@ from vllm_omni.model_executor.models.hunyuan_video.pipeline import HUNYUAN_VIDEO
 from vllm_omni.model_executor.models.indextts2.pipeline import (
     INDEXTTS2_PIPELINE,
     INDEXTTS25_PIPELINE,
+    resolve_indextts2_pipeline,
 )
 from vllm_omni.model_executor.models.lance.pipeline import LANCE_PIPELINE
 from vllm_omni.model_executor.models.mammoth_moda2.pipeline import (
     MAMMOTH_MODA2_AR_PIPELINE,
     MAMMOTH_MODA2_PIPELINE,
 )
-from vllm_omni.model_executor.models.mimo_audio.pipeline import MIMO_AUDIO_PIPELINE
+from vllm_omni.model_executor.models.mimo_audio.pipeline import resolve_mimo_audio_pipeline
 from vllm_omni.model_executor.models.ming_flash_omni.pipeline import (
     MING_FLASH_OMNI_IMAGE_PIPELINE,
     MING_FLASH_OMNI_PIPELINE,
@@ -87,22 +90,22 @@ from vllm_omni.model_executor.models.ming_tts.pipeline import (
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO_4_5_PIPELINE
 from vllm_omni.model_executor.models.minimax_music3.pipeline import MINIMAX_MUSIC3_PIPELINE
 from vllm_omni.model_executor.models.moss_tts.pipeline import (
-    MOSS_TTS_LOCAL_PIPELINE,
     MOSS_TTS_PIPELINE,
     MOSS_TTS_REALTIME_PIPELINE,
+    resolve_moss_tts_local_pipeline,
 )
-from vllm_omni.model_executor.models.moss_tts_nano.pipeline import MOSS_TTS_NANO_PIPELINE
+from vllm_omni.model_executor.models.moss_tts_nano.pipeline import resolve_moss_tts_nano_pipeline
 from vllm_omni.model_executor.models.nemotron_voicechat.pipeline import (
     NEMOTRON_VOICECHAT_PIPELINE,
 )
 from vllm_omni.model_executor.models.omnivoice.pipeline import OMNIVOICE_PIPELINE
 from vllm_omni.model_executor.models.personaplex.pipeline import PERSONAPLEX_PIPELINE
 from vllm_omni.model_executor.models.qwen2_5_omni.pipeline import (
-    QWEN2_5_OMNI_PIPELINE,
     QWEN2_5_OMNI_THINKER_ONLY_PIPELINE,
+    resolve_qwen2_5_omni_pipeline,
 )
 from vllm_omni.model_executor.models.qwen3_omni.pipeline import resolve_qwen3_omni_pipeline
-from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
+from vllm_omni.model_executor.models.qwen3_tts.pipeline import resolve_qwen3_tts_pipeline
 from vllm_omni.model_executor.models.soulx_singer.pipeline import (
     SOULXSINGER_SVC_PIPELINE,
     SOULXSINGER_SVS_PIPELINE,
@@ -121,8 +124,8 @@ PipelineResolverFunc: TypeAlias = Callable[[PretrainedConfig | None], PipelineCo
 
 # --- Multi-stage omni pipelines (LLM-centric; audio / video I/O) ---
 OMNI_PIPELINES: dict[str, PipelineConfig | PipelineResolverFunc] = {
-    "aura_omni": AURA_OMNI_PIPELINE,
-    "qwen2_5_omni": QWEN2_5_OMNI_PIPELINE,
+    "aura_omni": resolve_aura_omni_pipeline,
+    "qwen2_5_omni": resolve_qwen2_5_omni_pipeline,
     "qwen2_5_omni_thinker_only": QWEN2_5_OMNI_THINKER_ONLY_PIPELINE,
     "personaplex": PERSONAPLEX_PIPELINE,
     "nemotron_voicechat": NEMOTRON_VOICECHAT_PIPELINE,
@@ -131,10 +134,10 @@ OMNI_PIPELINES: dict[str, PipelineConfig | PipelineResolverFunc] = {
     # has no model_type key).
     "nemotron_labs_voicechat": NEMOTRON_VOICECHAT_PIPELINE,
     "qwen3_omni_moe": resolve_qwen3_omni_pipeline,
-    "qwen3_tts": QWEN3_TTS_PIPELINE,
+    "qwen3_tts": resolve_qwen3_tts_pipeline,
     "step_audio_2": STEP_AUDIO2_PIPELINE,
     "step_audio_2_asr": STEP_AUDIO2_ASR_PIPELINE,
-    "covo_audio": COVO_AUDIO_PIPELINE,
+    "covo_audio": resolve_covo_audio_pipeline,
     "bagel": BAGEL_PIPELINE,
     "bagel_think": BAGEL_THINK_PIPELINE,
     "bagel_single_stage": BAGEL_SINGLE_STAGE_PIPELINE,
@@ -151,41 +154,46 @@ OMNI_PIPELINES: dict[str, PipelineConfig | PipelineResolverFunc] = {
     "wan2_2_ti2v": WAN2_2_TI2V_PIPELINE,
     "voxcpm2": VOXCPM2_PIPELINE,
     "dots_tts": DOTS_TTS_PIPELINE,
-    "cosyvoice3": COSYVOICE3_PIPELINE,
-    "audex_tts": AUDEX_TTS_PIPELINE,
-    "audex_tta": AUDEX_TTA_PIPELINE,
+    "cosyvoice3": resolve_cosyvoice3_pipeline,
+    "audex_tts": resolve_audex_tts_pipeline,
+    "audex_tta": resolve_audex_tta_pipeline,
     "audex_thinker_only": AUDEX_THINKER_ONLY_PIPELINE,
-    "audex_s2s": AUDEX_S2S_PIPELINE,
+    "audex_s2s": resolve_audex_s2s_pipeline,
     # Alias: the Nemotron-Labs-Audex-2B repo-root config.json reports
     # ``model_type: nemotron_labs_audex``; bare ``vllm-omni serve <repo>``
     # auto-detects through it and must land on the default (TTS) pipeline.
-    "nemotron_labs_audex": AUDEX_TTS_PIPELINE,
-    "mimo_audio": MIMO_AUDIO_PIPELINE,
+    "nemotron_labs_audex": resolve_audex_tts_pipeline,
+    "mimo_audio": resolve_mimo_audio_pipeline,
     "ming_tts": MING_TTS_PIPELINE,
     "ming_tts_moe": MING_TTS_MOE_PIPELINE,
     "voxtral_tts": VOXTRAL_TTS_PIPELINE,
-    "glm_tts": GLM_TTS_PIPELINE,
-    "fish_qwen3_omni": FISH_SPEECH_PIPELINE,
+    "glm_tts": resolve_glm_tts_pipeline,
+    "fish_qwen3_omni": resolve_fish_speech_pipeline,
     "ming_flash_omni": MING_FLASH_OMNI_PIPELINE,
     "ming_flash_omni_tts": MING_FLASH_OMNI_TTS_PIPELINE,
     "ming_flash_omni_thinker_only": MING_FLASH_OMNI_THINKER_ONLY_PIPELINE,
     "ming_flash_omni_image": MING_FLASH_OMNI_IMAGE_PIPELINE,
-    "moss_tts_nano": MOSS_TTS_NANO_PIPELINE,
+    "moss_tts_nano": resolve_moss_tts_nano_pipeline,
     "omnivoice": OMNIVOICE_PIPELINE,
     "mammoth_moda2": MAMMOTH_MODA2_PIPELINE,
     "mammoth_moda2_ar": MAMMOTH_MODA2_AR_PIPELINE,
     "moss_tts_delay": MOSS_TTS_PIPELINE,
     "moss_tts_realtime": MOSS_TTS_REALTIME_PIPELINE,
-    "moss_tts_local": MOSS_TTS_LOCAL_PIPELINE,
+    "moss_tts_local": resolve_moss_tts_local_pipeline,
     "minicpmo_4_5": MINICPMO_4_5_PIPELINE,
     "minimax_music3": MINIMAX_MUSIC3_PIPELINE,
-    "higgs_audio_v2": HIGGS_AUDIO_V2_PIPELINE,
-    "higgs_multimodal_qwen3": HIGGS_AUDIO_V3_PIPELINE,
+    "higgs_audio_v2": resolve_higgs_audio_v2_pipeline,
+    "higgs_multimodal_qwen3": resolve_higgs_audio_v3_pipeline,
     "dynin_omni": DYNIN_OMNI_PIPELINE,
-    "indextts2": INDEXTTS2_PIPELINE,
-    "indextts2_5": INDEXTTS25_PIPELINE,
+    "indextts2": resolve_indextts2_pipeline,
+    "indextts2_5": resolve_indextts2_pipeline,
     "soulxsinger_svc": SOULXSINGER_SVC_PIPELINE,
     "soulxsinger_svs": SOULXSINGER_SVS_PIPELINE,
+}
+
+_RESOLVER_DEFAULT_OVERRIDES: dict[str, PipelineConfig] = {
+    "indextts2": INDEXTTS2_PIPELINE,
+    "indextts2_5": INDEXTTS25_PIPELINE,
 }
 
 
@@ -220,4 +228,16 @@ def resolve_pipeline_config(
         logger.warning("Model type %s is not registered to OMNI_PIPELINES", model_type)
         return None
     pipeline = OMNI_PIPELINES[model_type]
-    return pipeline(hf_config) if callable(pipeline) else pipeline
+    if not callable(pipeline):
+        return pipeline
+    default = _RESOLVER_DEFAULT_OVERRIDES.get(
+        model_type,
+        getattr(pipeline, "default_pipeline_config", None),
+    )
+    config_type = getattr(pipeline, "config_type", None)
+    if hf_config is None or (config_type is not None and not isinstance(hf_config, config_type)):
+        return default
+    if model_type in _RESOLVER_DEFAULT_OVERRIDES and getattr(hf_config, "model_type", None) != model_type:
+        return default
+    resolved = pipeline(hf_config)
+    return resolved if resolved is not None else default

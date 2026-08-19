@@ -118,6 +118,7 @@ from vllm.multimodal.utils import set_mm_embedding_modality
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.qwen2_5_omni.qwen2_5_omni_thinker import (
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerMultiModalDataParser,
@@ -1234,7 +1235,12 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3Omni_VisionTransformer(
                 vision_config=thinker_config.vision_config,
-                norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
+                norm_eps=get_required_config_field(
+                    thinker_config.text_config,
+                    "rms_norm_eps",
+                    expected_type=float,
+                    model="qwen3_omni",
+                ),
                 quant_config=visual_quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )

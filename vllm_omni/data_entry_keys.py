@@ -96,6 +96,9 @@ class OmniPayloadMeta(TypedDict, total=False):
     # reproducible, and the producing stage's SamplingParams do not travel
     # with the payload.
     audio_seed: int
+    # Opaque, model-owned runtime metadata. Generic transport preserves the
+    # mapping; model-local producers and consumers own namespacing and schema.
+    model_runtime: dict[str, Any] | None
 
 
 class OmniPayload(TypedDict, total=False):
@@ -195,6 +198,7 @@ class MetaStruct(_StructBase):
     code_flat_numel: int | None = None
     omni_final_stage_id: int | None = None
     audio_seed: int | None = None
+    model_runtime: dict[str, Any] | None = None
 
 
 class OmniPayloadStruct(_StructBase):
@@ -400,13 +404,18 @@ def serialize_payload(
 
 
 def deserialize_payload(
-    wire: AdditionalInformationPayload,
+    wire: AdditionalInformationPayload | dict[str, Any],
 ) -> OmniPayload:
     """Deserialize an ``AdditionalInformationPayload`` back to ``OmniPayload``.
 
     Decodes entries to tensors/lists, then uses :func:`unflatten_payload`
     to reconstruct the nested structure.
     """
+    from vllm_omni.engine import AdditionalInformationPayload
+
+    if isinstance(wire, dict):
+        wire = msgspec.convert(wire, type=AdditionalInformationPayload)
+
     flat: dict[str, Any] = {}
 
     for key, entry in wire.entries.items():

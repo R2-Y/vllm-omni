@@ -167,7 +167,7 @@ class Qwen2DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 1000000)
+        rope_theta = config.rope_theta
         rope_scaling = getattr(config, "rope_scaling", None)
 
         # By default, Qwen2 uses causal attention as it is a decoder-only model.

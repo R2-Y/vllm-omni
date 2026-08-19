@@ -1511,7 +1511,7 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
             )
 
         if caches is not None:
-            prefix_length = int(getattr(self.config, "sliding_window", 0) or 0)
+            prefix_length = int(self.config.sliding_window or 0)
             initial_codec_chunk_frames = int(getattr(self, "_initial_codec_chunk_frames", 1))
             codec_chunk_frames = int(getattr(self, "_incremental_chunk_frames", 25))
             chunk_ramp = list(getattr(self, "_incremental_chunk_ramp", ()) or ())

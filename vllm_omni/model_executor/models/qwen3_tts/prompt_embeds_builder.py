@@ -623,7 +623,7 @@ class Qwen3TTSPromptEmbedsBuilder:
             pass
 
         # Resample to 24kHz for speaker encoder.
-        target_sr = int(getattr(self._config.speaker_encoder_config, "sample_rate", 24000))
+        target_sr = self._config.speaker_encoder_config.sample_rate
         if sr != target_sr:
             resampler = self._get_resampler(int(sr), target_sr)
             wav = resampler.resample(wav.astype(np.float32), orig_sr=int(sr))

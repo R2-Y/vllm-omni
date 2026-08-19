@@ -51,6 +51,7 @@ from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 from vllm.sequence import IntermediateTensors
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.dots_tts.dots_tts_dit import DiT
 from vllm_omni.model_executor.models.dots_tts.dots_tts_patch_encoder import (
     VAESemanticEncoder,
@@ -324,7 +325,12 @@ class DotsTTSForConditionalGeneration(nn.Module):
         llm_hidden = self.config.hidden_size
         fm_hidden = dit_config.hidden_size
         latent_dim = int(self.config.latent_dim)
-        xvec_dim = int(getattr(self.config, "campplus_embedding_size", 512))
+        xvec_dim = get_required_config_field(
+            self.config,
+            "campplus_embedding_size",
+            expected_type=int,
+            model="dots_tts",
+        )
 
         self._audio_vae = AudioVAE(_build_audio_vae_config(self.config))
         # Upstream serializes vocoder.safetensors with weight_norm folded into
@@ -388,7 +394,12 @@ class DotsTTSForConditionalGeneration(nn.Module):
         self._speaker_encoder = SpeakerXVectorFeatures(
             sample_rate=self._audio_vae.sample_rate,
             campplus_embedding_size=xvec_dim,
-            max_audio_seconds=float(getattr(self.config, "xvec_max_audio_seconds", 10.0)),
+            max_audio_seconds=get_required_config_field(
+                self.config,
+                "xvec_max_audio_seconds",
+                expected_type=float,
+                model="dots_tts",
+            ),
         )
 
         # Pin AudioVAE + speaker encoder to fp32 (mirror upstream

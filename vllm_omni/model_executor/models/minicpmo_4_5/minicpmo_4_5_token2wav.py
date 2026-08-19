@@ -22,6 +22,9 @@ from typing import Any
 import numpy as np
 import torch
 
+from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
+    StepAudio2Config,
+)
 from vllm_omni.model_executor.models.step_audio2.step_audio2_token2wav import (
     StepAudio2Token2WavCore,
     _StreamState,
@@ -70,9 +73,9 @@ class MiniCPMO45Token2wav:
         self.device = _resolve_device(device)
         self._core = StepAudio2Token2WavCore(
             model_path=model_path,
+            config=StepAudio2Config(n_timesteps=n_timesteps),
             float16=float16,
             device=self.device,
-            n_timesteps=n_timesteps,
         )
         # Eager-load so construction failures surface at init time (same as
         # the external Token2wav package), not on the first request.

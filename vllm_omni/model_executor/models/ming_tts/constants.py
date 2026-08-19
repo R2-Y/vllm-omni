@@ -3,35 +3,6 @@
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# Token IDs (confirmed from tokenizer_config.json)
-# ---------------------------------------------------------------------------
-
-AUDIO_DUMMY_TOKEN_ID = 151705  # <audioPatch>
-AUDIO_START_TOKEN_ID = 151706  # <audio>
-AUDIO_END_TOKEN_ID = 151707  # </audio>
-AUDIO_EOS_TOKEN_ID = 151704  # <end_of_audio>
-VISION_START_TOKEN_ID = 151652  # <|vision_start|>
-
-TEXT_EOS_TOKEN_ID = 151669  # <text_eos>
-
-
-# ---------------------------------------------------------------------------
-# MoE (bailing_moe / Ming-omni-tts-16.8B-A3B) token IDs
-# (confirmed from the bailing tokenizer_config.json — different vocab than the
-# dense Qwen2 tokenizer above). The bailing tokenizer has NO <text_eos>; the
-# audio AR loop terminates purely on the stop-head (see upstream
-# modeling_bailingmm.sample), so <end_of_audio> doubles as the AR stop token.
-# ---------------------------------------------------------------------------
-
-MOE_AUDIO_DUMMY_TOKEN_ID = 126357  # <audioPatch>
-MOE_AUDIO_START_TOKEN_ID = 126358  # <audio>
-MOE_AUDIO_END_TOKEN_ID = 126359  # </audio>
-MOE_AUDIO_EOS_TOKEN_ID = 126356  # <end_of_audio>
-MOE_TEXT_EOS_TOKEN_ID = 126356  # no <text_eos> in bailing; reuse <end_of_audio> as AR stop
-MOE_SPK_TOKEN_ID = 126368  # <spk> — speaker-embedding placeholder (dense uses <|vision_start|>)
-
-
-# ---------------------------------------------------------------------------
 # Architectural constants (confirmed from original config.json)
 # ---------------------------------------------------------------------------
 
@@ -47,10 +18,6 @@ SPEAKER_EMBEDDING_DIM = 192  # CAMPPlus output width and speaker projection inpu
 
 # AudioVAE frame/hop geometry (confirmed)
 AUDIO_FRAME_HOP = 882  # enc input_dim / hop_size / dec output_dim
-
-# stop_head defaults
-STOP_HEAD_MIN_STEPS = 3
-STOP_HEAD_THRESHOLD = 0.5
 
 # FlowLoss sampling defaults
 DEFAULT_CFG = 2.0

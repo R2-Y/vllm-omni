@@ -14,7 +14,11 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
+    pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
 )
+
+from .runtime_config import MossTTSNanoConfig, resolve_moss_tts_nano_runtime_config
 
 MOSS_TTS_NANO_PIPELINE = PipelineConfig(
     model_type="moss_tts_nano",
@@ -32,10 +36,20 @@ MOSS_TTS_NANO_PIPELINE = PipelineConfig(
             engine_output_type="audio",
             sampling_constraints={
                 "detokenize": False,
-                # compute_logits() forces EOS (token id 2) when the last
-                # streaming chunk is yielded; keep a hard backstop here.
-                "stop_token_ids": [2],
             },
         ),
     ),
 )
+
+
+@pipeline_cfg_resolver(
+    config_type=MossTTSNanoConfig,
+    default_pipeline_config=MOSS_TTS_NANO_PIPELINE,
+)
+def resolve_moss_tts_nano_pipeline(hf_config: MossTTSNanoConfig) -> PipelineConfig:
+    runtime = resolve_moss_tts_nano_runtime_config(hf_config)
+    return replace_stage_sampling_constraints(
+        MOSS_TTS_NANO_PIPELINE,
+        stage_id=0,
+        updates={"stop_token_ids": [runtime.eos_token_id]},
+    )

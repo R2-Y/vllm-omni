@@ -19,6 +19,7 @@ from vllm_omni.engine.orchestrator import (
     OrchestratorRequestState,
     _OrchestratorDuplexStagePort,
 )
+from vllm_omni.engine.stage_engine_core_client import StageEngineCoreClientBase
 from vllm_omni.engine.stage_pool import StagePool
 from vllm_omni.experimental.fullduplex.engine.contracts import (
     DuplexStageRequestContext,
@@ -46,11 +47,35 @@ class FakeStageClient:
         self.engine_input_source = [0]
         self.is_comprehension = False
         self.model_stage = None
-        self.custom_process_input_func = None
         self.next_inputs = list(next_inputs or [])
         self.add_request_calls: list[tuple[Any, ...]] = []
         self.decoded_source_tokens: str | None = None
+        self.received_sampling_params = None
+        self.received_source_sampling_params = None
         self._engine_core_outputs = queue.Queue()
+
+        def processor(
+            _source_outputs,
+            _prompt,
+            _requires_multimodal_data,
+            *,
+            streaming_context=None,
+            sampling_params=None,
+            source_sampling_params=None,
+            target_sampling_params=None,
+        ):
+            self.received_sampling_params = sampling_params
+            self.received_source_sampling_params = source_sampling_params
+            assert target_sampling_params is sampling_params
+            decoder = getattr(streaming_context, "source_token_decoder", None)
+            if callable(decoder):
+                self.decoded_source_tokens = decoder(
+                    [11, 12],
+                    skip_special_tokens=True,
+                )
+            return list(self.next_inputs)
+
+        self.custom_process_input_func = processor
 
     async def add_request_async(self, *args, **_kwargs) -> None:
         self.add_request_calls.append(args)
@@ -61,11 +86,24 @@ class FakeStageClient:
         except queue.Empty:
             return SimpleNamespace(outputs=[])
 
-    def process_engine_inputs(self, _source_outputs, prompt=None, streaming_context=None):
-        decoder = getattr(streaming_context, "source_token_decoder", None)
-        if callable(decoder):
-            self.decoded_source_tokens = decoder([11, 12], skip_special_tokens=True)
-        return list(self.next_inputs)
+    def process_engine_inputs(
+        self,
+        _source_outputs,
+        prompt=None,
+        streaming_context=None,
+        sampling_params=None,
+        source_sampling_params=None,
+        target_sampling_params=None,
+    ):
+        return StageEngineCoreClientBase.process_engine_inputs(
+            self,
+            _source_outputs,
+            prompt,
+            streaming_context=streaming_context,
+            sampling_params=sampling_params,
+            source_sampling_params=source_sampling_params,
+            target_sampling_params=target_sampling_params,
+        )
 
     async def abort_requests_async(self, _request_ids: list[str]) -> None:
         return None
@@ -232,6 +270,8 @@ async def test_forward_text_prompt_uses_target_stage_input_processor() -> None:
     assert input_processor.calls
     assert input_processor.calls[0]["prompt"] == {"prompt": "hello", "multi_modal_data": {"video": ["frame"]}}
     assert stage1.decoded_source_tokens == "11:12"
+    assert stage1.received_sampling_params is req_state.sampling_params_list[1]
+    assert stage1.received_source_sampling_params is req_state.sampling_params_list[0]
     assert req_state.streaming.source_token_decoder is None
     assert stage1.add_request_calls
     submitted_request = stage1.add_request_calls[0][0]

@@ -24,6 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.diffusion.layers.custom_op import CustomOp
 from vllm_omni.platforms import current_omni_platform
 
@@ -98,14 +99,27 @@ class _RotaryEmbedding(CustomOp):
             "head_dim",
             config.hidden_size // config.num_attention_heads,
         )
-        rope_theta = getattr(config, "rope_theta", 10000.0)
+        rope_theta = get_required_config_field(
+            config,
+            "rope_theta",
+            expected_type=float,
+            model="qwen3_code_predictor",
+        )
         inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         # Build the cos/sin lookup tables once.  ``num_code_groups + 1``
         # positions cover every re-prefill step of the code predictor.  Compute
         # in float32 (matching HF) and cast per-call in forward.
-        max_seq = int(getattr(config, "num_code_groups", 0) or 0) + 1
+        max_seq = (
+            get_required_config_field(
+                config,
+                "num_code_groups",
+                expected_type=int,
+                model="qwen3_code_predictor",
+            )
+            + 1
+        )
         positions = torch.arange(max_seq, dtype=torch.float32)
         freqs = torch.outer(positions, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)

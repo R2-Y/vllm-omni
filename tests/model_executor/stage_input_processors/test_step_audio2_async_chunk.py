@@ -2,19 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 
-from vllm_omni.model_executor.models.step_audio2.step_audio2_constants import (
-    DEFAULT_STREAM_CONFIG,
-    DEFAULT_TOKEN_CONFIG,
+from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
+    StepAudio2Config,
 )
 from vllm_omni.model_executor.stage_input_processors.step_audio2 import (
     thinker2token2wav_async_chunk,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+def _runtime(config: StepAudio2Config) -> dict:
+    return {"meta": {"model_runtime": {"step_audio2": asdict(config)}}}
 
 
 def _req(external_req_id: str, *, prompt_token_ids: list[int], all_token_ids: list[int], finished: bool):
@@ -27,8 +31,9 @@ def _req(external_req_id: str, *, prompt_token_ids: list[int], all_token_ids: li
 
 
 def test_step_audio2_async_chunk_uses_decode_only_tokens_not_prompt_history():
-    audio_start = DEFAULT_TOKEN_CONFIG.audio_start
-    audio_eos = DEFAULT_TOKEN_CONFIG.audio_eos
+    config = StepAudio2Config(audio_start=120000, text_max=119998, audio_patch_token_id=119999)
+    audio_start = config.audio_start
+    audio_eos = config.audio_eos
     transfer_manager = SimpleNamespace(code_prompt_token_ids=defaultdict(list))
 
     prompt = [11, 12, audio_start + 5]  # historical prompt audio token
@@ -42,7 +47,7 @@ def test_step_audio2_async_chunk_uses_decode_only_tokens_not_prompt_history():
 
     payload = thinker2token2wav_async_chunk(
         transfer_manager=transfer_manager,
-        multimodal_output=None,
+        multimodal_output=_runtime(config),
         request=request,
     )
 
@@ -53,8 +58,9 @@ def test_step_audio2_async_chunk_uses_decode_only_tokens_not_prompt_history():
 
 
 def test_step_audio2_async_chunk_returns_none_when_not_enough_tokens():
-    audio_start = DEFAULT_TOKEN_CONFIG.audio_start
-    required = DEFAULT_STREAM_CONFIG.chunk_size + DEFAULT_STREAM_CONFIG.pre_lookahead_len
+    config = StepAudio2Config(chunk_size=7, pre_lookahead_len=2)
+    audio_start = config.audio_start
+    required = config.chunk_size + config.pre_lookahead_len
     transfer_manager = SimpleNamespace(code_prompt_token_ids=defaultdict(list))
 
     generated = [audio_start + i for i in range(required - 1)]
@@ -67,7 +73,7 @@ def test_step_audio2_async_chunk_returns_none_when_not_enough_tokens():
 
     payload = thinker2token2wav_async_chunk(
         transfer_manager=transfer_manager,
-        multimodal_output=None,
+        multimodal_output=_runtime(config),
         request=request,
     )
 
@@ -75,9 +81,10 @@ def test_step_audio2_async_chunk_returns_none_when_not_enough_tokens():
 
 
 def test_step_audio2_async_chunk_emits_non_last_chunk_and_advances_consumed_by_chunk_size():
-    audio_start = DEFAULT_TOKEN_CONFIG.audio_start
-    chunk_size = DEFAULT_STREAM_CONFIG.chunk_size
-    required = chunk_size + DEFAULT_STREAM_CONFIG.pre_lookahead_len
+    config = StepAudio2Config(chunk_size=7, pre_lookahead_len=2)
+    audio_start = config.audio_start
+    chunk_size = config.chunk_size
+    required = chunk_size + config.pre_lookahead_len
     transfer_manager = SimpleNamespace(code_prompt_token_ids=defaultdict(list))
 
     generated = [audio_start + i for i in range(required + 10)]
@@ -90,7 +97,7 @@ def test_step_audio2_async_chunk_emits_non_last_chunk_and_advances_consumed_by_c
 
     payload = thinker2token2wav_async_chunk(
         transfer_manager=transfer_manager,
-        multimodal_output=None,
+        multimodal_output=_runtime(config),
         request=request,
     )
 
@@ -102,6 +109,7 @@ def test_step_audio2_async_chunk_emits_non_last_chunk_and_advances_consumed_by_c
 
 
 def test_step_audio2_async_chunk_emits_eof_when_finished_with_no_remaining_audio():
+    config = StepAudio2Config()
     transfer_manager = SimpleNamespace(code_prompt_token_ids=defaultdict(list))
     transfer_manager.code_prompt_token_ids["rid-eof"] = [1, 2, 3]
 
@@ -111,16 +119,16 @@ def test_step_audio2_async_chunk_emits_eof_when_finished_with_no_remaining_audio
         all_token_ids=[
             10,
             11,
-            DEFAULT_TOKEN_CONFIG.audio_start + 1,
-            DEFAULT_TOKEN_CONFIG.audio_start + 2,
-            DEFAULT_TOKEN_CONFIG.audio_start + 3,
+            config.audio_start + 1,
+            config.audio_start + 2,
+            config.audio_start + 3,
         ],
         finished=True,
     )
 
     payload = thinker2token2wav_async_chunk(
         transfer_manager=transfer_manager,
-        multimodal_output=None,
+        multimodal_output=_runtime(config),
         request=request,
     )
 
@@ -128,3 +136,18 @@ def test_step_audio2_async_chunk_emits_eof_when_finished_with_no_remaining_audio
     assert payload.codes.audio.numel() == 0
     assert payload.meta.left_context_size == 1
     assert payload.meta.finished.item() is True
+
+
+def test_step_audio2_async_chunk_requires_model_runtime_meta():
+    request = _req(
+        "rid-missing-runtime",
+        prompt_token_ids=[],
+        all_token_ids=[],
+        finished=True,
+    )
+    with pytest.raises(ValueError, match="model runtime metadata"):
+        thinker2token2wav_async_chunk(
+            transfer_manager=SimpleNamespace(code_prompt_token_ids=defaultdict(list)),
+            multimodal_output=None,
+            request=request,
+        )

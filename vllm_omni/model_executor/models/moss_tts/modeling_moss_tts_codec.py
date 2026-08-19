@@ -16,6 +16,7 @@ from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.moss_tts.audio_tokenizer import (
     MossAudioTokenizerConfig,
     MossAudioTokenizerModel,
@@ -234,7 +235,12 @@ class MossTTSCodecDecoder(nn.Module):
         self.vllm_config = vllm_config
 
         cfg = vllm_config.model_config.hf_config
-        self._n_vq: int = int(getattr(cfg, "n_vq", getattr(cfg, "rvq", 16)))
+        self._n_vq = get_required_config_field(
+            cfg,
+            "n_vq",
+            expected_type=int,
+            model="moss_tts",
+        )
         self._codec_path: str = str(
             getattr(
                 cfg,
@@ -251,7 +257,15 @@ class MossTTSCodecDecoder(nn.Module):
         self._sr_tensor = torch.tensor(self._OUTPUT_SAMPLE_RATE, dtype=torch.int32)
         self._stream_session: _MossCodecStreamSession | None = None
         scheduler_cfg = getattr(self.vllm_config, "scheduler_config", None)
-        self._stream_state_capacity = max(1, int(getattr(scheduler_cfg, "max_num_seqs", 1) or 1))
+        self._stream_state_capacity = max(
+            1,
+            get_required_config_field(
+                scheduler_cfg,
+                "max_num_seqs",
+                expected_type=int,
+                model="moss_tts",
+            ),
+        )
         self._initial_stream_chunk_frames: int = self._connector_int("initial_codec_chunk_frames", default=0)
         self._stream_chunk_frames: int = self._connector_int("codec_chunk_frames", default=0)
         self._stream_max_step_frames: int = self._stream_chunk_frames or 100
@@ -794,7 +808,15 @@ class MossTTSCodecDecoder(nn.Module):
 
     def _build_codec(self, codec_path: str) -> tuple[Any, nn.Module]:
         config_dict, _ = MossAudioTokenizerV2Config.get_config_dict(codec_path)
-        is_v2 = config_dict.get("number_channels", 1) >= 2
+        is_v2 = (
+            get_required_config_field(
+                config_dict,
+                "number_channels",
+                expected_type=int,
+                model="moss_tts",
+            )
+            >= 2
+        )
 
         if is_v2:
             try:

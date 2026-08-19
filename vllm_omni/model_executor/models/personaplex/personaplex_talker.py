@@ -42,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 from vllm.sequence import IntermediateTensors
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.personaplex.configuration_personaplex import (
     PersonaPlexConfig,
@@ -430,7 +431,12 @@ class PersonaPlexTalkerForConditionalGeneration(nn.Module):
             self,
             model_path=model_path,
             device=device,
-            max_sessions=int(getattr(self.vllm_config.model_config, "duplex_max_sessions", 1)),
+            max_sessions=get_required_config_field(
+                self.vllm_config.model_config,
+                "duplex_max_sessions",
+                expected_type=int,
+                model="personaplex",
+            ),
         )
         self._personaplex_duplex_stage0_runtime = runtime
         return runtime

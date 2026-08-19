@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     MetaStruct,
@@ -137,9 +138,15 @@ def slow_ar_to_dac_decoder_async_chunk(
     elif not finished:
         return None
 
-    chunk_size = int(cfg.get("codec_chunk_frames", 25))
-    left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
-    configured_initial_chunk_size = int(cfg.get("initial_codec_chunk_frames", 0))
+    chunk_size = get_required_config_field(
+        cfg, "codec_chunk_frames", expected_type=int, model="fish_speech"
+    )
+    left_context_size_config = get_required_config_field(
+        cfg, "codec_left_context_frames", expected_type=int, model="fish_speech"
+    )
+    configured_initial_chunk_size = get_required_config_field(
+        cfg, "initial_codec_chunk_frames", expected_type=int, model="fish_speech"
+    )
 
     initial_chunk_size = configured_initial_chunk_size
 

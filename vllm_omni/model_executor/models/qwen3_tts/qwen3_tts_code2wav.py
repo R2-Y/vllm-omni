@@ -106,7 +106,7 @@ class Qwen3TTSCode2Wav(nn.Module):
         self._num_quantizers = int(dec_config.num_quantizers)
         self._output_sample_rate = int(tok_config.output_sample_rate)
         self._total_upsample = int(self.decoder.total_upsample)
-        self._decoder_sliding_window = int(getattr(dec_config, "sliding_window", 0) or 0)
+        self._decoder_sliding_window = int(dec_config.sliding_window or 0)
         self._decoder_state_cache: dict[str, dict[str, Any]] = {}
         self._decoder_state_cache_warn_entries = 512
 

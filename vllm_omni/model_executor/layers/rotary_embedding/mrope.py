@@ -27,6 +27,13 @@ else:
 logger = init_logger(__name__)
 
 
+def _required_tokens_per_second(config: object, *, model: str) -> float:
+    value = getattr(config, "tokens_per_second", None)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"Model {model!r} requires numeric config field 'tokens_per_second'; got {value!r}")
+    return float(value)
+
+
 class OmniMRotaryEmbedding(_BaseMRotaryEmbedding):
     """Omni-extended MRotaryEmbedding with multimodal position computation.
 
@@ -232,7 +239,10 @@ class OmniMRotaryEmbedding(_BaseMRotaryEmbedding):
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
+        tokens_per_second = _required_tokens_per_second(
+            hf_config.vision_config,
+            model="qwen2_5_omni",
+        )
 
         input_tokens_tensor = torch.tensor(input_tokens)
         vision_start_indices = torch.argwhere(input_tokens_tensor == vision_start_token_id).squeeze(1)
@@ -358,7 +368,10 @@ class OmniMRotaryEmbedding(_BaseMRotaryEmbedding):
         vision_end_token_id = thinker_config.vision_end_token_id
         seconds_per_chunk = thinker_config.seconds_per_chunk
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second", 25)
+        tokens_per_second = _required_tokens_per_second(
+            thinker_config.vision_config,
+            model="qwen3_omni",
+        )
 
         if isinstance(image_grid_thw, list):
             image_grid_thw = torch.tensor(image_grid_thw)
@@ -534,7 +547,10 @@ class OmniMRotaryEmbedding(_BaseMRotaryEmbedding):
         audio_end_token_id = thinker_config.audio_end_token_id
         seconds_per_chunk = thinker_config.seconds_per_chunk
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second", 25)
+        tokens_per_second = _required_tokens_per_second(
+            thinker_config.vision_config,
+            model="qwen3_omni",
+        )
 
         grid_t = video_grid_thw[0]
         grid_h = video_grid_thw[1]

@@ -43,6 +43,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.nemotron_voicechat.runtime_info import (
     merge_runtime_info,
     require_request_id,
@@ -101,8 +102,21 @@ class NemotronVoiceChatTalkerForConditionalGeneration(nn.Module):
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         talker_cfg = getattr(self.config, "talker_config", None)
-        self._hidden = int(getattr(talker_cfg, "hidden_size", 1152))
-        self._vocab = max(int(getattr(talker_cfg, "vocab_size", 1024)), 2)
+        self._hidden = get_required_config_field(
+            talker_cfg,
+            "hidden_size",
+            expected_type=int,
+            model="nemotron_voicechat",
+        )
+        self._vocab = max(
+            get_required_config_field(
+                talker_cfg,
+                "vocab_size",
+                expected_type=int,
+                model="nemotron_voicechat",
+            ),
+            2,
+        )
         self._dtype = getattr(vllm_config.model_config, "dtype", torch.bfloat16)
         self._speaker_name = getattr(self.config, "inference_speaker_name", "Aria") or "Aria"
 
@@ -114,7 +128,12 @@ class NemotronVoiceChatTalkerForConditionalGeneration(nn.Module):
 
         # Stateful per-request execution is only validated at batch size 1
         # (the shipped offline scope); fail fast on silent multi-request use.
-        max_num_seqs = int(getattr(vllm_config.scheduler_config, "max_num_seqs", 1))
+        max_num_seqs = get_required_config_field(
+            vllm_config.scheduler_config,
+            "max_num_seqs",
+            expected_type=int,
+            model="nemotron_voicechat",
+        )
         if max_num_seqs != 1:
             raise NotImplementedError(
                 f"NemotronVoiceChat talker supports max_num_seqs=1 only (got {max_num_seqs}); "
@@ -443,9 +462,42 @@ class NemotronVoiceChatTalkerForConditionalGeneration(nn.Module):
             )
         tts_model_cfg = sanitize_tts_model_cfg(tts_model_cfg)
         tts_data = dict(getattr(self.config, "tts_data", {}) or {})
-        tts_data.setdefault("source_sample_rate", 22050)
-        tts_data.setdefault("target_sample_rate", int(getattr(self.config, "target_sample_rate", 22050)))
-        tts_data.setdefault("frame_length", float(getattr(self.config, "frame_length", 0.08)))
+        tts_source_sample_rate = get_required_config_field(
+            self.config,
+            "tts_source_sample_rate",
+            expected_type=int,
+            model="nemotron_voicechat",
+        )
+        configured_source_rate = tts_data.get("source_sample_rate")
+        if configured_source_rate is not None and configured_source_rate != tts_source_sample_rate:
+            raise ValueError(
+                "Nemotron VoiceChat has inconsistent TTS source_sample_rate: "
+                f"tts_data={configured_source_rate!r}, model_config={tts_source_sample_rate!r}"
+            )
+        tts_data["source_sample_rate"] = tts_source_sample_rate
+        target_sample_rate = get_required_config_field(
+            self.config,
+            "target_sample_rate",
+            expected_type=int,
+            model="nemotron_voicechat",
+        )
+        frame_length = get_required_config_field(
+            self.config,
+            "frame_length",
+            expected_type=float,
+            model="nemotron_voicechat",
+        )
+        for field, expected in (
+            ("target_sample_rate", target_sample_rate),
+            ("frame_length", frame_length),
+        ):
+            configured = tts_data.get(field)
+            if configured is not None and configured != expected:
+                raise ValueError(
+                    f"Nemotron VoiceChat has inconsistent {field}: "
+                    f"tts_data={configured!r}, model_config={expected!r}"
+                )
+            tts_data[field] = expected
         # DuplexEARTTS consumes the whole speech_generation section layout
         # ({"data": ..., "model": ...}), matching NeMo's constructor call.
         tts = DuplexEARTTS({"data": tts_data, "model": tts_model_cfg})

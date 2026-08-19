@@ -154,7 +154,15 @@ class FakeStageClient:
     def set_engine_outputs(self, outputs) -> None:
         return None
 
-    def process_engine_inputs(self, source_outputs, prompt=None, streaming_context=None):
+    def process_engine_inputs(
+        self,
+        source_outputs,
+        prompt=None,
+        streaming_context=None,
+        sampling_params=None,
+        source_sampling_params=None,
+        target_sampling_params=None,
+    ):
         return list(self.next_inputs)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -713,6 +721,108 @@ async def test_run_llm_to_diffusion(orchestrator_factory) -> None:
         assert output_msg.finished is True
         assert output_msg.engine_outputs.request_id == "req-img"
         assert "req-img" not in orchestrator_fixture.orchestrator.request_states
+    finally:
+        await _shutdown_orchestrator(orchestrator_fixture)
+
+
+@pytest.mark.parametrize(
+    "signature_case",
+    ["positional_only_sampling", "legacy_context", "source_target_params"],
+)
+@pytest.mark.asyncio
+async def test_llm_to_diffusion_processor_uses_shared_signature_adapter(
+    orchestrator_factory,
+    signature_case,
+) -> None:
+    stage0 = FakeStageClient(stage_type="llm", final_output=False)
+    stage1 = FakeStageClient(
+        stage_type="diffusion",
+        final_output=True,
+        final_output_type="image",
+    )
+    received = {}
+
+    if signature_case == "positional_only_sampling":
+
+        def processor(source, prompt, requires_mm, sampling_params, /):
+            received["sampling_params"] = sampling_params
+            return {"prompt": "adapted"}
+
+    elif signature_case == "legacy_context":
+
+        def processor(source, prompt, requires_mm, legacy_context):
+            received["streaming_context"] = legacy_context
+            return {"prompt": "adapted"}
+
+    else:
+
+        def processor(
+            source,
+            prompt,
+            requires_mm,
+            *,
+            streaming_context=None,
+            sampling_params=None,
+            source_sampling_params=None,
+            target_sampling_params=None,
+        ):
+            received.update(
+                streaming_context=streaming_context,
+                sampling_params=sampling_params,
+                source_sampling_params=source_sampling_params,
+                target_sampling_params=target_sampling_params,
+            )
+            return {"prompt": "adapted"}
+
+    stage1.custom_process_input_func = processor
+    processors = [
+        FakeOutputProcessor(
+            request_outputs=[
+                _build_request_output(
+                    f"req-{signature_case}",
+                    token_ids=[3, 4],
+                    finished=True,
+                )
+            ]
+        ),
+        FakeOutputProcessor(),
+    ]
+    orchestrator_fixture = orchestrator_factory(
+        [stage0, stage1],
+        output_processors=processors,
+    )
+    source_params = _sampling_params()
+    target_params = OmniDiffusionSamplingParams()
+
+    try:
+        await _enqueue_add_request(
+            orchestrator_fixture,
+            request_id=f"req-{signature_case}",
+            prompt=SimpleNamespace(
+                request_id=f"req-{signature_case}",
+                prompt_token_ids=[1, 2, 3],
+            ),
+            original_prompt={"prompt": "draw a fox"},
+            sampling_params_list=[source_params, target_params],
+            final_stage_id=1,
+        )
+
+        await _wait_for(lambda: len(stage0.add_request_calls) == 1)
+        stage0.push_engine_core_outputs(
+            _engine_core_outputs(f"raw-{signature_case}", 1.0)
+        )
+        await _wait_for(lambda: len(stage1.add_request_calls) == 1)
+
+        assert stage1.add_request_calls[0][1] == {"prompt": "adapted"}
+        if signature_case == "positional_only_sampling":
+            assert received["sampling_params"] is target_params
+        elif signature_case == "legacy_context":
+            assert received["streaming_context"] is not None
+        else:
+            assert received["streaming_context"] is not None
+            assert received["sampling_params"] is target_params
+            assert received["source_sampling_params"] is source_params
+            assert received["target_sampling_params"] is target_params
     finally:
         await _shutdown_orchestrator(orchestrator_fixture)
 

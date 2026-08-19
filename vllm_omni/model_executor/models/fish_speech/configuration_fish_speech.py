@@ -130,6 +130,7 @@ class FishSpeechConfig(PretrainedConfig):
         semantic_start_token_id: int = 151678,
         semantic_end_token_id: int = 155773,
         audio_pad_token_id: int = 151677,
+        im_end_token_id: int = 151645,
         **kwargs,
     ):
         if isinstance(text_config, dict):
@@ -143,6 +144,7 @@ class FishSpeechConfig(PretrainedConfig):
         self.semantic_start_token_id = semantic_start_token_id
         self.semantic_end_token_id = semantic_end_token_id
         self.audio_pad_token_id = audio_pad_token_id
+        self.im_end_token_id = im_end_token_id
 
         # Propagate semantic IDs into text_config for convenience.
         self.text_config.semantic_begin_id = semantic_start_token_id

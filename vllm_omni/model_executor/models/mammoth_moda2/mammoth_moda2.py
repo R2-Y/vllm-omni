@@ -53,6 +53,7 @@ from vllm.transformers_utils.config import (
     set_default_rope_theta,
 )
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights, is_interleaved
 from vllm_omni.transformers_utils.configs.mammoth_moda2 import Mammothmoda2Config
@@ -307,7 +308,12 @@ class MammothModa2Qwen2ForCausalLM(nn.Module, SupportsPP):
         self.gen_vocab_start_index = getattr(hf_config, "gen_vocab_start_index", None) or getattr(
             config, "gen_vocab_start_index", None
         )
-        self.gen_vocab_size = int(getattr(config, "gen_vocab_size", 0) or 0)
+        self.gen_vocab_size = get_required_config_field(
+            config,
+            "gen_vocab_size",
+            expected_type=int,
+            model="mammoth_moda2",
+        )
 
         self.base_vocab_size = int(self.gen_vocab_start_index) if self.extra_gen_vocab else int(config.vocab_size)
         self.org_base_vocab_size = int(getattr(config, "base_vocab_size", self.base_vocab_size))

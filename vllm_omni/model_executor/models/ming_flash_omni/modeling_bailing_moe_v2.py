@@ -60,6 +60,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMoeV2Config
 
@@ -487,7 +488,12 @@ class BailingMoeV2Attention(nn.Module):
             raise ValueError("rope_scaling must not be None")
 
         rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        mrope_section = config.rope_scaling.get("mrope_section", [8, 12, 12])
+        mrope_section = get_required_config_field(
+            config,
+            "rope_scaling.mrope_section",
+            expected_type=list,
+            model="ming_flash_omni",
+        )
 
         if rope_type == "video_rope":
             # Ming-specific video_rope with custom H/W interleaving

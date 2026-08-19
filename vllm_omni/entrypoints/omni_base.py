@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import time
 import weakref
@@ -339,7 +340,33 @@ class OmniBase(PDDisaggregationMixin):
             raise ValueError(f"Expected {self.num_stages} sampling params, got a single sampling params object")
         if len(normalized) != self.num_stages:
             raise ValueError(f"Expected {self.num_stages} sampling params, got {len(normalized)}")
-        return normalized
+
+        merged: list[Any] = []
+        for stage_index, params in enumerate(normalized):
+            cloned = params.clone() if hasattr(params, "clone") else copy.deepcopy(params)
+            if stage_index < len(self.default_sampling_params_list):
+                default = self.default_sampling_params_list[stage_index]
+                default_extra = copy.deepcopy(getattr(default, "extra_args", None) or {})
+                user_extra = copy.deepcopy(getattr(cloned, "extra_args", None) or {})
+                internal_runtime = default_extra.get("model_runtime")
+                default_extra.update(user_extra)
+                if internal_runtime is not None:
+                    # ``model_runtime`` is an engine-owned typed contract. A
+                    # request may add unrelated extra args but cannot delete or
+                    # replace checkpoint-bound runtime values.
+                    user_runtime = user_extra.get("model_runtime")
+                    merged_runtime = (
+                        copy.deepcopy(user_runtime)
+                        if isinstance(user_runtime, dict)
+                        else {}
+                    )
+                    for namespace, values in internal_runtime.items():
+                        merged_runtime[namespace] = copy.deepcopy(values)
+                    default_extra["model_runtime"] = merged_runtime
+                if hasattr(cloned, "extra_args"):
+                    cloned.extra_args = default_extra or None
+            merged.append(cloned)
+        return merged
 
     def _fire_failure_counter_if_alive(self, request_id: str) -> None:
         """Fire the abort/exception bucket of requests_success_total.

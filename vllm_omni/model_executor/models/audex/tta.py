@@ -47,13 +47,6 @@ NEG_INF = float("-inf")
 XCODEC1_NUM_CODEBOOKS = 4
 XCODEC1_CODEBOOK_SIZE = 1024
 
-# Pinned by a unit test against the real checkpoint tokenizer.
-AUDEX_AUDIOGEN_START_TOKEN_ID = 131073
-AUDEX_AUDIOGEN_END_TOKEN_ID = 131074
-AUDEX_AUDIOCODEC_TOKEN_OFFSET = 196613
-AUDEX_AUDIOCODEC_VOCAB_SIZE = 8192
-
-
 def build_tta_phase_token_ids(tokenizer: Any) -> tuple[list[list[int]], int, int]:
     """Group tokenizer ids of ``<audiocodec_N>`` into the 4 RVQ phases.
 

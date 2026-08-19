@@ -16,7 +16,6 @@ from typing import Any
 INDEXTTS25_TOKENIZER_FILE = "multilingual_zh_ja_yue_char_del.tiktoken"
 INDEXTTS25_MERGEABLE_RANKS = 58836
 INDEXTTS25_VOCAB_SIZE = 60509
-INDEXTTS25_NUM_SPECIAL_LANGUAGES = 99
 
 # Order is checkpoint ABI: lang_embedding rows were trained against these IDs.
 LANGUAGES = (
@@ -175,33 +174,45 @@ _AUDIO_EVENTS = (
     "/Applause",
 )
 _EMOTIONS = ("HAPPY", "SAD", "ANGRY", "NEUTRAL")
-_TTS_VOCAL_TOKENS = (
-    "TTS/B",
-    "TTS/O",
-    "TTS/Q",
-    "TTS/A",
-    "TTS/CO",
-    "TTS/CL",
-    "TTS/H",
-    *(f"TTS/SP{i:02d}" for i in range(1, 14)),
+_LANGUAGES_WITHOUT_SPECIAL_TOKEN = frozenset(
+    {"su", "yue", "minnan", "wuyu", "dialect", "zh/en", "en/zh", "common"}
 )
 
-INDEXTTS25_SPECIAL_TOKENS = (
-    "<|endoftext|>",
-    "<|startoftranscript|>",
-    *(f"<|{lang}|>" for lang in LANGUAGES[:INDEXTTS25_NUM_SPECIAL_LANGUAGES]),
-    *(f"<|{event}|>" for event in _AUDIO_EVENTS),
-    *(f"<|{emotion}|>" for emotion in _EMOTIONS),
-    "<|translate|>",
-    "<|transcribe|>",
-    "<|startoflm|>",
-    "<|startofprev|>",
-    "<|nospeech|>",
-    "<|notimestamps|>",
-    *(f"<|SPECIAL_TOKEN_{i}|>" for i in range(1, 31)),
-    *(f"<|{token}|>" for token in _TTS_VOCAL_TOKENS),
-    *(f"<|{i * 0.02:.2f}|>" for i in range(1501)),
-)
+
+def _build_special_tokens() -> tuple[str, ...]:
+    """Build the checkpoint tokenizer ABI from its semantic token groups."""
+    registered_languages = tuple(lang for lang in LANGUAGES if lang not in _LANGUAGES_WITHOUT_SPECIAL_TOKEN)
+    vocal_tokens = (
+        "TTS/B",
+        "TTS/O",
+        "TTS/Q",
+        "TTS/A",
+        "TTS/CO",
+        "TTS/CL",
+        "TTS/H",
+        *(f"TTS/SP{i:02d}" for i in range(1, 14)),
+    )
+    return (
+        "<|endoftext|>",
+        "<|startoftranscript|>",
+        *(f"<|{lang}|>" for lang in registered_languages),
+        *(f"<|{event}|>" for event in _AUDIO_EVENTS),
+        *(f"<|{emotion}|>" for emotion in _EMOTIONS),
+        "<|translate|>",
+        "<|transcribe|>",
+        "<|startoflm|>",
+        "<|startofprev|>",
+        "<|nospeech|>",
+        "<|notimestamps|>",
+        # Reserved checkpoint rows and 20 ms timestamp bins are tokenizer ABI,
+        # not model-runtime defaults.
+        *(f"<|SPECIAL_TOKEN_{i}|>" for i in range(1, 31)),
+        *(f"<|{token}|>" for token in vocal_tokens),
+        *(f"<|{i * 0.02:.2f}|>" for i in range(1501)),
+    )
+
+
+INDEXTTS25_SPECIAL_TOKENS = _build_special_tokens()
 
 _PATTERN = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 

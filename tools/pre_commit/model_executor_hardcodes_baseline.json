@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Reviewed algorithm/inter-stage protocol constants only. Model, tokenizer, request, and runtime defaults must come from concrete configuration or payload metadata.",
+  "categories": {
+    "config-owned": "Model/checkpoint configuration should own this value.",
+    "tokenizer-owned": "Tokenizer metadata or token lookup should own this value.",
+    "algorithm-protocol": "The value is part of an algorithm, tensor layout, codec, or inter-stage protocol.",
+    "request-runtime": "Request or runtime configuration should supply this value.",
+    "dead-constant": "Suspected unused compatibility constant; remove only with model-specific validation."
+  },
+  "allowlist": [
+    {"path":"vllm_omni/model_executor/models/dots_tts/pipeline.py","rule":"pipeline-stop-token-ids","category":"algorithm-protocol","count":1,"digest":"cf5a26df306c4091","rationale":"The talker exposes a two-slot continue/stop protocol; slot 1 is the stop class, not a tokenizer ID."},
+    {"path":"vllm_omni/model_executor/models/gepard/pipeline.py","rule":"module-special-control-token","category":"algorithm-protocol","count":1,"digest":"61406e9b428358c2","rationale":"The sentinel is one past Gepard head-0's fixed FSQ range 0..7 and is consumed only by the sampler protocol."},
+    {"path":"vllm_omni/model_executor/models/higgs_audio_v2/higgs_audio_v2_tokenizer.py","rule":"module-special-control-token","category":"algorithm-protocol","count":2,"digest":"c145c526ad130ecb","rationale":"These are codec stream ramp sentinels equal to the one-past-codebook protocol positions, not text tokenizer IDs."},
+    {"path":"vllm_omni/model_executor/models/mimo_audio/config_mimo_audio.py","rule":"module-special-control-token","category":"algorithm-protocol","count":1,"digest":"506e6ce07dfc1c46","rationale":"PAD_GROUP_SIZE is the fixed interleaving group width shared by the MiMo tensor protocol."},
+    {"path":"vllm_omni/model_executor/models/ming_tts/patch_emission.py","rule":"module-special-control-token","category":"algorithm-protocol","count":1,"digest":"13e7387281916f76","rationale":"The integer map serializes Ming stop-reason enum values across stages; it does not represent model tokens."},
+    {"path":"vllm_omni/model_executor/models/minicpmo_4_5/batched_token2wav.py","rule":"module-special-control-token","category":"algorithm-protocol","count":1,"digest":"890c6caf5cdce0cf","rationale":"The silence lookahead code is part of the fixed MiniCPM token2wav codec protocol."},
+    {"path":"vllm_omni/model_executor/models/minimax_music3/constants.py","rule":"module-special-control-token","category":"algorithm-protocol","count":1,"digest":"a5b36908d4985eb3","rationale":"MAX_PROMPT_TOKENS reserves part of the fixed 10,240-position AR context for generated audio frames."},
+    {"path":"vllm_omni/model_executor/models/nemotron_voicechat/nemotron_voicechat_talker.py","rule":"module-special-control-token","category":"algorithm-protocol","count":2,"digest":"0a775575b9cf8b3a","rationale":"The talker emits a binary continue/stop classifier; values 0 and 1 are class indices rather than vocabulary IDs."},
+    {"path":"vllm_omni/model_executor/models/voxcpm2/pipeline.py","rule":"pipeline-stop-token-ids","category":"algorithm-protocol","count":1,"digest":"cf5a26df306c4091","rationale":"VoxCPM2 compute_logits exposes a binary continue/stop protocol whose stop class is index 1."},
+    {"path":"vllm_omni/model_executor/stage_input_processors/higgs_audio_v2.py","rule":"module-special-control-token","category":"algorithm-protocol","count":2,"digest":"c145c526ad130ecb","rationale":"The stage bridge strips the same one-past-codebook ramp sentinels emitted by the Higgs codec stream protocol."},
+    {"path":"vllm_omni/model_executor/stage_input_processors/moss_tts.py","rule":"module-special-control-token","category":"algorithm-protocol","count":1,"digest":"19b4c0197e0d3eae","rationale":"The value is the one-past-codebook pad code used to remove padded RVQ rows from the inter-stage tensor stream."}
+  ]
+}

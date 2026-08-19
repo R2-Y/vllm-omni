@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import re
 import warnings
-from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, fields
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -21,6 +22,9 @@ from vllm_omni.config.endpoint_policy import EndpointRestriction
 from vllm_omni.config.yaml_util import create_config, load_yaml_config, to_dict
 from vllm_omni.core.sched.omni_ar_scheduler import OmniARAsyncScheduler, OmniARScheduler
 from vllm_omni.core.sched.omni_generation_scheduler import OmniGenerationScheduler
+from vllm_omni.model_executor.config_contract import (
+    get_required_config_field as get_required_config_field,
+)
 
 logger = init_logger(__name__)
 
@@ -29,16 +33,27 @@ _DEPLOY_DIR = Path(__file__).resolve().parent.parent / "deploy"
 _STAGE_OVERRIDE_PATTERN = re.compile(r"^stage_(\d+)_(.+)$")
 
 
-def pipeline_cfg_resolver(config_type: type[PretrainedConfig]):
-    """Wraps a resolver such that we return None if a hf_config of the wrong type is provided."""
+def pipeline_cfg_resolver(
+    config_type: type[PretrainedConfig],
+    default_pipeline_config: PipelineConfig | None = None,
+):
+    """Bind strict config resolution to one type while preserving topology.
+
+    Registry callers historically resolve a pipeline by key alone. Returning
+    the frozen default topology for absent or unrelated configs keeps that
+    contract, while strict checkpoint reads only run after a type match.
+    """
 
     def resolver_builder(func):
         @functools.wraps(func)
         def wrapper(hf_config: PretrainedConfig | None):
             if hf_config is None or not isinstance(hf_config, config_type):
-                return None
+                return default_pipeline_config
             return func(hf_config)
 
+        if default_pipeline_config is not None:
+            wrapper.default_pipeline_config = default_pipeline_config
+        wrapper.config_type = config_type
         return wrapper
 
     return resolver_builder
@@ -247,6 +262,11 @@ class PipelineConfig:
     # Bundled deploy defaults for this concrete pipeline topology. The file is
     # loaded from vllm_omni/deploy; None uses DeployConfig defaults.
     default_deploy_config_name: str | None = None
+    # Model-owned connector values that must be present before stage startup.
+    # Each entry is checked in every configured connector's ``extra`` mapping.
+    required_connector_extra_fields: tuple[str, ...] = ()
+    # Inclusive minimum for strict integer connector fields.
+    connector_extra_int_minimums: tuple[tuple[str, int], ...] = ()
 
     def get_stage(self, stage_id: int) -> StagePipelineConfig | None:
         """Look up a stage by its ID."""
@@ -274,6 +294,35 @@ class PipelineConfig:
         if not any(not s.input_sources for s in self.stages):
             errors.append("No entry point (stage with empty input_sources)")
         return errors
+
+
+def replace_stage_sampling_constraints(
+    pipeline: PipelineConfig,
+    *,
+    stage_id: int,
+    updates: Mapping[str, Any],
+) -> PipelineConfig:
+    """Return a frozen pipeline copy with merged constraints for one stage."""
+    replacement_found = False
+    stages: list[StagePipelineConfig] = []
+    for stage in pipeline.stages:
+        if stage.stage_id != stage_id:
+            stages.append(stage)
+            continue
+        replacement_found = True
+        stages.append(
+            replace(
+                stage,
+                sampling_constraints={
+                    **stage.sampling_constraints,
+                    **updates,
+                },
+            )
+        )
+
+    if not replacement_found:
+        raise ValueError(f"Pipeline {pipeline.model_type!r} has no stage {stage_id}")
+    return replace(pipeline, stages=tuple(stages))
 
 
 @dataclass
@@ -854,8 +903,8 @@ def _build_extras(
     extras: dict[str, Any] = {}
     sampling: dict[str, Any] = {}
     if ds is not None and ds.default_sampling_params:
-        sampling.update(ds.default_sampling_params)
-    sampling.update(ps.sampling_constraints)
+        sampling = copy.deepcopy(ds.default_sampling_params)
+    sampling = _deep_merge_mapping(sampling, ps.sampling_constraints)
     if sampling:
         extras["default_sampling_params"] = sampling
     if ds is not None and ds.default_pooling_params:
@@ -873,6 +922,71 @@ def _build_extras(
     return extras
 
 
+def _deep_merge_mapping(
+    base: Mapping[str, Any],
+    authoritative: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge nested mappings with ``authoritative`` values winning."""
+    merged = copy.deepcopy(dict(base))
+    for key, value in authoritative.items():
+        existing = merged.get(key)
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge_mapping(existing, value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _validate_connector_runtime_contract(
+    pipeline: PipelineConfig,
+    deploy: DeployConfig,
+) -> None:
+    required = pipeline.required_connector_extra_fields
+    minimums = dict(pipeline.connector_extra_int_minimums)
+    required = tuple(dict.fromkeys((*required, *minimums)))
+    if not required:
+        return
+    connectors = deploy.connectors or {}
+    active_connector_names: set[str] = set()
+    for stage in deploy.stages:
+        for stage_connectors in (stage.input_connectors, stage.output_connectors):
+            if isinstance(stage_connectors, Mapping):
+                active_connector_names.update(stage_connectors.values())
+    if not active_connector_names:
+        if not deploy.async_chunk:
+            return
+        raise ValueError(
+            f"Pipeline {pipeline.model_type!r} with async_chunk enabled requires "
+            f"an active connector with extra fields {required!r} before stage startup"
+        )
+    for connector_name in sorted(active_connector_names):
+        connector = connectors.get(connector_name)
+        if not isinstance(connector, Mapping):
+            raise ValueError(
+                f"Pipeline {pipeline.model_type!r} references active connector "
+                f"{connector_name!r}, but it is not defined"
+            )
+        extra = connector.get("extra", {}) if isinstance(connector, Mapping) else {}
+        for field_name in required:
+            if not isinstance(extra, Mapping) or field_name not in extra:
+                raise ValueError(
+                    f"Pipeline {pipeline.model_type!r} connector {connector_name!r} "
+                    f"requires extra field {field_name!r} before stage startup"
+                )
+            value = extra[field_name]
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"Pipeline {pipeline.model_type!r} connector {connector_name!r} "
+                    f"requires integer extra field {field_name!r}; got {value!r}"
+                )
+            minimum = minimums.get(field_name)
+            if minimum is not None and value < minimum:
+                raise ValueError(
+                    f"Pipeline {pipeline.model_type!r} connector {connector_name!r} "
+                    f"requires extra field {field_name!r} >= {minimum}; got {value}"
+                )
+
+
 def merge_pipeline_deploy(
     pipeline: PipelineConfig,
     deploy: DeployConfig,
@@ -882,6 +996,7 @@ def merge_pipeline_deploy(
     if cli_overrides is None:
         cli_overrides = {}
 
+    _validate_connector_runtime_contract(pipeline, deploy)
     deploy = _apply_platform_overrides(deploy)
     deploy_by_id = {s.stage_id: s for s in deploy.stages}
 

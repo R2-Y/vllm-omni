@@ -13,11 +13,7 @@ from vllm_omni.model_executor.models.common.ming.audio_vae import AudioVAEConfig
 
 from .constants import (
     AGGREGATOR_HIDDEN_SIZE,
-    AUDIO_DUMMY_TOKEN_ID,
-    AUDIO_END_TOKEN_ID,
-    AUDIO_EOS_TOKEN_ID,
     AUDIO_FRAME_HOP,
-    AUDIO_START_TOKEN_ID,
     DEFAULT_CFG,
     DEFAULT_SIGMA,
     DEFAULT_TEMPERATURE,
@@ -46,19 +42,9 @@ from .constants import (
     LLM_HIDDEN_SIZE,
     LLM_VOCAB_SIZE,
     MAX_DECODE_STEPS,
-    MOE_AUDIO_DUMMY_TOKEN_ID,
-    MOE_AUDIO_END_TOKEN_ID,
-    MOE_AUDIO_EOS_TOKEN_ID,
-    MOE_AUDIO_START_TOKEN_ID,
-    MOE_SPK_TOKEN_ID,
-    MOE_TEXT_EOS_TOKEN_ID,
     PATCH_SIZE,
     SAMPLE_RATE,
-    STOP_HEAD_MIN_STEPS,
-    STOP_HEAD_THRESHOLD,
-    TEXT_EOS_TOKEN_ID,
     VAE_PATCH_SIZE,
-    VISION_START_TOKEN_ID,
 )
 from .validation import _coerce_audio_vae_config, _nested_get, _to_plain_dict, validate_ming_tts_config
 
@@ -139,6 +125,12 @@ class BailingMoeConfig(PretrainedConfig):
         output_router_logits: bool = False,
         multi_gate: bool = False,
         image_patch_token: int = 126346,
+        audio_dummy_token_id: int = 126357,
+        audio_start_token_id: int = 126358,
+        audio_end_token_id: int = 126359,
+        audio_eos_token_id: int = 126356,
+        text_eos_token_id: int = 126356,
+        speaker_placeholder_token_id: int = 126368,
         use_grouped_gemm: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -167,6 +159,12 @@ class BailingMoeConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.multi_gate = multi_gate
         self.image_patch_token = image_patch_token
+        self.audio_dummy_token_id = audio_dummy_token_id
+        self.audio_start_token_id = audio_start_token_id
+        self.audio_end_token_id = audio_end_token_id
+        self.audio_eos_token_id = audio_eos_token_id
+        self.text_eos_token_id = text_eos_token_id
+        self.speaker_placeholder_token_id = speaker_placeholder_token_id
         self.use_grouped_gemm = use_grouped_gemm
         super().__init__(pad_token_id=pad_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs)
 
@@ -238,20 +236,21 @@ class MingTTSConfig:
     cfg: float = DEFAULT_CFG
     sigma: float = DEFAULT_SIGMA
     temperature: float = DEFAULT_TEMPERATURE
-    stop_head_min_steps: int = STOP_HEAD_MIN_STEPS
-    stop_head_threshold: float = STOP_HEAD_THRESHOLD
+    stop_head_min_steps: int = 3
+    stop_head_threshold: float = 0.5
     max_decode_steps: int = MAX_DECODE_STEPS
 
     latent_chunk_size: int = LATENT_CHUNK_SIZE
     initial_latent_chunk_size: int = INITIAL_LATENT_CHUNK_SIZE
     latent_left_context: int = LATENT_LEFT_CONTEXT
 
-    text_eos_token_id: int = TEXT_EOS_TOKEN_ID
-    audio_dummy_token_id: int = AUDIO_DUMMY_TOKEN_ID
-    audio_start_token_id: int = AUDIO_START_TOKEN_ID
-    audio_end_token_id: int = AUDIO_END_TOKEN_ID
-    audio_eos_token_id: int = AUDIO_EOS_TOKEN_ID
-    speaker_placeholder_token_id: int = VISION_START_TOKEN_ID  # dense <|vision_start|>; moe <spk>
+    # Dense tokenizer schema defaults; MoE values come from BailingMoeConfig.
+    text_eos_token_id: int = 151669
+    audio_dummy_token_id: int = 151705
+    audio_start_token_id: int = 151706
+    audio_end_token_id: int = 151707
+    audio_eos_token_id: int = 151704
+    speaker_placeholder_token_id: int = 151652
 
     @classmethod
     def from_hf_config(cls, hf_config: PretrainedConfig) -> MingTTSConfig:
@@ -294,12 +293,17 @@ class MingTTSConfig:
         if model_variant == "moe":
             # The bailing tokenizer uses a different vocab; override the dense
             # (Qwen2) special-token defaults with the bailing token IDs.
-            cfg.text_eos_token_id = MOE_TEXT_EOS_TOKEN_ID
-            cfg.audio_dummy_token_id = MOE_AUDIO_DUMMY_TOKEN_ID
-            cfg.audio_start_token_id = MOE_AUDIO_START_TOKEN_ID
-            cfg.audio_end_token_id = MOE_AUDIO_END_TOKEN_ID
-            cfg.audio_eos_token_id = MOE_AUDIO_EOS_TOKEN_ID
-            cfg.speaker_placeholder_token_id = MOE_SPK_TOKEN_ID
+            for field_name in (
+                "text_eos_token_id",
+                "audio_dummy_token_id",
+                "audio_start_token_id",
+                "audio_end_token_id",
+                "audio_eos_token_id",
+                "speaker_placeholder_token_id",
+            ):
+                if field_name not in llm_dict:
+                    raise ValueError(f"Ming MoE config requires llm_config.{field_name}")
+                setattr(cfg, field_name, int(llm_dict[field_name]))
         return cfg
 
     def validate(self) -> None:
@@ -308,11 +312,7 @@ class MingTTSConfig:
 
 __all__ = [
     "AGGREGATOR_HIDDEN_SIZE",
-    "AUDIO_DUMMY_TOKEN_ID",
-    "AUDIO_END_TOKEN_ID",
-    "AUDIO_EOS_TOKEN_ID",
     "AUDIO_FRAME_HOP",
-    "AUDIO_START_TOKEN_ID",
     "DEFAULT_CFG",
     "DEFAULT_SIGMA",
     "DEFAULT_TEMPERATURE",
@@ -346,9 +346,5 @@ __all__ = [
     "MingTTSConfig",
     "PATCH_SIZE",
     "SAMPLE_RATE",
-    "STOP_HEAD_MIN_STEPS",
-    "STOP_HEAD_THRESHOLD",
-    "TEXT_EOS_TOKEN_ID",
     "VAE_PATCH_SIZE",
-    "VISION_START_TOKEN_ID",
 ]

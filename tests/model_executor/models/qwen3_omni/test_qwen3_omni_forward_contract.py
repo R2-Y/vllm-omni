@@ -133,6 +133,14 @@ def _make_combined(*, is_staged_run: bool, accept_hidden_layer=6) -> Qwen3OmniMo
     model.model_stage = "thinker"
     model.is_staged_run = is_staged_run
     model.talker_config = SimpleNamespace(accept_hidden_layer=accept_hidden_layer)
+    model.runtime_config = (
+        SimpleNamespace(
+            accept_hidden_layer=accept_hidden_layer,
+            to_payload_meta=lambda: {},
+        )
+        if accept_hidden_layer is not None
+        else None
+    )
     model.thinker = _ThinkerStub()
     return model
 

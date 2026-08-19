@@ -19,7 +19,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import TALKER_CODEC_PAD_TOKEN_ID, MiMoAudioConfig
+from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import MiMoAudioConfig
 from vllm_omni.model_executor.models.mimo_audio.cuda_graph_decoder_wrapper import CUDAGraphMiMoDecoderWrapper
 from vllm_omni.model_executor.models.mimo_audio.modeling_audio_tokenizer import MiMoAudioTokenizer
 from vllm_omni.model_executor.models.output_templates import OmniOutput
@@ -437,6 +437,7 @@ class MiMoAudioToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         config = MiMoAudioConfig(**vars(config)) if isinstance(config, Qwen2Config) else config
         self.config = config
+        self._vocoder_attn_window_size = config.parsed_vocoder_attn_window_size()
         self.vllm_config = vllm_config
         self.quant_config = vllm_config.quant_config
         self.lora_config = vllm_config.lora_config
@@ -444,7 +445,7 @@ class MiMoAudioToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.device = current_omni_platform.get_torch_device()
-        self.sample_rate = getattr(config, "audio_sample_rate", 24000)
+        self.sample_rate = config.audio_sample_rate
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.name_or_path, trust_remote_code=True)
         self.codes = MiMoAudioCodes.from_tokenizer(self.tokenizer)
@@ -477,9 +478,9 @@ class MiMoAudioToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         # samples per codec frame for streaming context strip (same as tokenizer frames_per_token)
         audio_tokenizer_config = self._tokenizer_service.audio_tokenizer.config
         self.total_upsample = (
-            getattr(audio_tokenizer_config, "avg_pooler", 2)
-            * getattr(audio_tokenizer_config, "stride_size", 2)
-            * getattr(audio_tokenizer_config, "hop_length", 240)
+            audio_tokenizer_config.avg_pooler
+            * audio_tokenizer_config.stride_size
+            * audio_tokenizer_config.hop_length
         ) * self.config.group_size
 
         connector_cfg = getattr(vllm_config.model_config, "stage_connector_config", None)
@@ -518,7 +519,7 @@ class MiMoAudioToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
                 "window %s); falling back to %d to prevent voice instability.",
                 raw_left,
                 _MIN_CODEC_LEFT_CONTEXT_FRAMES,
-                getattr(self.config, "vocoder_attn_window_size", [40, 10]),
+                self._vocoder_attn_window_size,
                 _DEFAULT_CODEC_LEFT_CONTEXT_FRAMES,
             )
             raw_left = _DEFAULT_CODEC_LEFT_CONTEXT_FRAMES
@@ -947,7 +948,7 @@ class MiMoAudioToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         if code_tensor is not None and code_tensor.numel() == expected:
             code_groups = code_tensor.view(self.config.group_size, self.config.audio_channels + 1)
             return (
-                (code_groups[:, 0] == TALKER_CODEC_PAD_TOKEN_ID).all() and (code_groups[:, 1:].sum() == 0).all()
+                (code_groups[:, 0] == self.config.empty_token_id).all() and (code_groups[:, 1:].sum() == 0).all()
             ).item()
         return False
 

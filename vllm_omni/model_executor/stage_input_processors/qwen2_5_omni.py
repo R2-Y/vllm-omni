@@ -12,13 +12,12 @@ from vllm_omni.data_entry_keys import (
     to_dict,
 )
 from vllm_omni.inputs.data import OmniTokensPrompt
+from vllm_omni.model_executor.models.qwen2_5_omni.runtime_config import (
+    get_required_qwen2_5_runtime_int,
+    qwen2_5_runtime_from_sampling_params,
+)
 
 logger = logging.getLogger(__name__)
-
-TALKER_CODEC_PAD_TOKEN_ID = 8292
-TALKER_CODEC_START_TOKEN_ID = 8293
-TALKER_CODEC_END_TOKEN_ID = 8294
-
 
 # ============================================================================
 # Worker-connector data plane (non-async-chunk path).
@@ -40,7 +39,7 @@ TALKER_CODEC_END_TOKEN_ID = 8294
 _FULL_PAYLOAD_REPLACE_KEYS: frozenset[str] = frozenset()
 
 
-def _strip_codec_boundaries(token_ids: list[int]) -> list[int]:
+def _strip_codec_boundaries(token_ids: list[int], runtime: dict) -> list[int]:
     """Keep only real codec ids for the code2wav stage.
 
     The talker stream can contain prompt/control ids (START/PAD/END/MASK) in
@@ -54,11 +53,13 @@ def _strip_codec_boundaries(token_ids: list[int]) -> list[int]:
     while trailing_placeholder_count < len(tids) and tids[-1 - trailing_placeholder_count] == -1:
         trailing_placeholder_count += 1
 
-    if tids and tids[-1] == TALKER_CODEC_END_TOKEN_ID:
+    codec_stop_token_id = get_required_qwen2_5_runtime_int(runtime, "codec_stop_token_id")
+    codec_pad_token_id = get_required_qwen2_5_runtime_int(runtime, "codec_pad_token_id")
+    if tids and tids[-1] == codec_stop_token_id:
         tids = tids[:-1]
         trailing_placeholder_count = 0
 
-    codec_ids = [tid for tid in tids if 0 <= tid < TALKER_CODEC_PAD_TOKEN_ID]
+    codec_ids = [tid for tid in tids if 0 <= tid < codec_pad_token_id]
     if trailing_placeholder_count > 0 and codec_ids:
         codec_ids.extend([codec_ids[-1]] * trailing_placeholder_count)
     return codec_ids
@@ -78,12 +79,12 @@ def talker2code2wav_token_only(
     code2wav_inputs = []
     for talker_output in source_outputs:
         output = talker_output.outputs[0]
-        token_ids = _strip_codec_boundaries(list(output.cumulative_token_ids))
-        if not token_ids:
+        token_count = max(len(list(output.cumulative_token_ids)) - 1, 0)
+        if token_count <= 0:
             continue
         code2wav_inputs.append(
             OmniTokensPrompt(
-                prompt_token_ids=[0] * len(token_ids),
+                prompt_token_ids=[0] * token_count,
                 additional_information=None,
                 multi_modal_data=None,
                 mm_processor_kwargs=None,
@@ -113,7 +114,8 @@ def talker2code2wav_full_payload(
             rid,
         )
         return None
-    token_ids = _strip_codec_boundaries(token_ids)
+    runtime = qwen2_5_runtime_from_sampling_params(getattr(request, "sampling_params", None))
+    token_ids = _strip_codec_boundaries(token_ids, runtime)
     if not token_ids:
         logger.warning(
             "qwen2_5_omni.talker2code2wav_full_payload: codec ids empty after "
@@ -149,7 +151,7 @@ def thinker2talker_token_only(
 ):
     """Placeholder builder for the connector-driven thinker->talker path.
 
-    Allocates the TALKER_CODEC_{START,PAD,END} prompt slots sized to the
+    Allocates the Talker codec start/pad/end prompt slots sized to the
     thinker prompt length and forwards ``multi_modal_data``.  The bulk
     payload (hidden_states / embed / ids) ships exclusively through
     ``thinker2talker_full_payload`` via the worker connector and lands
@@ -171,9 +173,9 @@ def thinker2talker_token_only(
         prompt_token_ids = thinker_output.prompt_token_ids
         talker_inputs.append(
             OmniTokensPrompt(
-                prompt_token_ids=[TALKER_CODEC_START_TOKEN_ID]
-                + [TALKER_CODEC_PAD_TOKEN_ID] * (len(prompt_token_ids))
-                + [TALKER_CODEC_END_TOKEN_ID],
+                # This channel is length-only; checkpoint-owned codec ids arrive
+                # through sampling runtime/full-payload transport.
+                prompt_token_ids=[0] * (len(prompt_token_ids) + 2),
                 additional_information=None,
                 multi_modal_data=(
                     multi_modal_data[thinker_output.request_id]

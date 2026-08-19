@@ -10,6 +10,7 @@ import torch
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     EmbeddingsStruct,
@@ -133,11 +134,30 @@ def talker2code2wav_async_chunk(
         connector = getattr(transfer_manager, "connector", None)
         raw_cfg = getattr(connector, "config", {}) or {}
         cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-        chunk_size = int(cfg.get("codec_chunk_frames", 25))
-        code_vocab_size = int(cfg.get("codec_vocab_size", 6561))
-        pre_lookahead_len = int(cfg.get("codec_pre_lookahead_frames", 3))
-        max_chunk_size = int(cfg.get("codec_max_chunk_frames", 4 * chunk_size))
-        stream_scale_factor = int(cfg.get("codec_stream_scale_factor", 2))
+        chunk_size = get_required_config_field(
+            cfg, "codec_chunk_frames", expected_type=int, model="cosyvoice3"
+        )
+        code_vocab_size = get_required_config_field(
+            cfg, "codec_vocab_size", expected_type=int, model="cosyvoice3"
+        )
+        pre_lookahead_len = get_required_config_field(
+            cfg,
+            "codec_pre_lookahead_frames",
+            expected_type=int,
+            model="cosyvoice3",
+        )
+        max_chunk_size = get_required_config_field(
+            cfg,
+            "codec_max_chunk_frames",
+            expected_type=int,
+            model="cosyvoice3",
+        )
+        stream_scale_factor = get_required_config_field(
+            cfg,
+            "codec_stream_scale_factor",
+            expected_type=int,
+            model="cosyvoice3",
+        )
         if chunk_size <= 0 or pre_lookahead_len < 0 or max_chunk_size <= 0 or stream_scale_factor <= 0:
             raise ValueError(
                 f"Invalid codec chunk config: codec_chunk_frames={chunk_size}, "

@@ -242,6 +242,7 @@ data/
 datasets/
 *.csv
 *.json
+!tools/pre_commit/model_executor_hardcodes_baseline.json
 !tests/dfx/perf/tests/*.json
 !apps/ComfyUI-vLLM-Omni/example_workflows/*.json
 !tests/assets/soulxsinger/*.json

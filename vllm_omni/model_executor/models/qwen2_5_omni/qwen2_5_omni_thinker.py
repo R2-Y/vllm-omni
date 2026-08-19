@@ -1069,7 +1069,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             if multimodal_config.get_limit_per_prompt("image") or multimodal_config.get_limit_per_prompt("video"):
                 self.visual = Qwen2_5_VisionTransformer(
                     vision_config=thinker_config.vision_config,
-                    norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
+                    norm_eps=thinker_config.text_config.rms_norm_eps,
                     quant_config=visual_quant_config,
                     prefix=maybe_prefix(prefix, "visual"),
                 )
@@ -1132,7 +1132,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def iter_mm_features(self, mm_features: list[MultiModalFeatureSpec]) -> Iterator[tuple[int, str, dict[str, Any]]]:
         thinker_config = self.config
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second", 25)
+        tokens_per_second = thinker_config.vision_config.tokens_per_second
 
         sorted_features = sorted(mm_features, key=lambda f: f.mm_position.offset)
         audio_for_video, paired_audio_offsets = self._get_audio_for_video_mapping(sorted_features)
@@ -1187,7 +1187,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         audio_len = data["audio_feature_length"]
 
         thinker_config = self.config
-        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second", 25)
+        tokens_per_second = thinker_config.vision_config.tokens_per_second
         seconds_per_chunk = thinker_config.seconds_per_chunk
         t_ntoken_per_chunk = int(tokens_per_second * seconds_per_chunk)
 

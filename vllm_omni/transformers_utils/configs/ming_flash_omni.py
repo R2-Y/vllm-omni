@@ -227,6 +227,7 @@ class WhisperEncoderConfig(PretrainedConfig):
         ds_kernel_size=3,
         ds_stride=2,
         norm_query_embeds=True,
+        sampling_rate: int = 16000,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -234,6 +235,7 @@ class WhisperEncoderConfig(PretrainedConfig):
         self.ds_kernel_size = ds_kernel_size
         self.ds_stride = ds_stride
         self.norm_query_embeds = norm_query_embeds
+        self.sampling_rate = sampling_rate
 
 
 class BailingMM2Config(PretrainedConfig):

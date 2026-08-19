@@ -128,6 +128,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 
+from vllm_omni.config.stage_config import get_required_config_field
+
 
 # vllm.transformers_utils.tokenizer no longer exists in upstream vLLM;
 # _encode_tokens uses tokenizer.encode() as the only code path.
@@ -269,6 +271,14 @@ class ConditionalChatTTSConfig(PretrainedConfig):
         top_p: float = 0.7,
         top_k: int = 20,
         repetition_penalty: float = 1.0,
+        seed: int = 42,
+        temperature: float = 0.8,
+        min_new_tokens: int = 50,
+        max_new_tokens: int = 2048,
+        min_audio_tokens: int = 64,
+        audio_tokens_per_text_token: int = 10,
+        duplex_codec_tokens_per_chunk: int = 26,
+        rms_norm_eps: float = 1e-6,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -301,6 +311,14 @@ class ConditionalChatTTSConfig(PretrainedConfig):
         self.top_p = top_p
         self.top_k = top_k
         self.repetition_penalty = repetition_penalty
+        self.seed = seed
+        self.temperature = temperature
+        self.min_new_tokens = min_new_tokens
+        self.max_new_tokens = max_new_tokens
+        self.min_audio_tokens = min_audio_tokens
+        self.audio_tokens_per_text_token = audio_tokens_per_text_token
+        self.duplex_codec_tokens_per_chunk = duplex_codec_tokens_per_chunk
+        self.rms_norm_eps = rms_norm_eps
 
 
 class MiniCPMOConfig(Qwen2Config):
@@ -2987,7 +3005,12 @@ class MiniCPMO45OmniLLMProcessingInfo(BaseProcessingInfo):
         )
 
     def get_default_audio_pool_step(self) -> int:
-        return getattr(self.get_hf_config(), "audio_pool_step", 5)
+        return get_required_config_field(
+            self.get_hf_config(),
+            "audio_pool_step",
+            expected_type=int,
+            model="minicpmo_4_5",
+        )
 
     def get_default_audio_sampling_rate(self) -> int:
         return 16000
@@ -3143,10 +3166,20 @@ class MiniCPMO45OmniLLMProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(image_size)
 
     def get_image_max_slice_num(self) -> int:
-        return getattr(self.get_hf_config(), "max_slice_num", 9)
+        return get_required_config_field(
+            self.get_hf_config(),
+            "max_slice_num",
+            expected_type=int,
+            model="minicpmo_4_5",
+        )
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        image_size = get_required_config_field(
+            self.get_hf_config(),
+            "image_size",
+            expected_type=int,
+            model="minicpmo_4_5",
+        )
         max_slice_num = self.get_image_max_slice_num()
         return ImageSize(width=image_size, height=image_size * max_slice_num)
 
@@ -3171,7 +3204,12 @@ class MiniCPMO45OmniLLMProcessingInfo(BaseProcessingInfo):
         return 1
 
     def get_video_frame_size_with_most_features(self) -> ImageSize:
-        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        image_size = get_required_config_field(
+            self.get_hf_config(),
+            "image_size",
+            expected_type=int,
+            model="minicpmo_4_5",
+        )
         max_slice_num = self.get_video_max_slice_num()
         return ImageSize(width=image_size, height=image_size * max_slice_num)
 

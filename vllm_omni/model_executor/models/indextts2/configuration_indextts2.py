@@ -146,6 +146,11 @@ class IndexTTS2Config(PretrainedConfig):
         "semantic_codec_type": "repcodec",
         "use_gpt_latent": True,
         "version": 2.0,
+        "conditioning_prefix_tokens": 34,
+        "diffusion_steps": 25,
+        "inference_cfg_rate": 0.7,
+        "s2mel_cfm_batch_size": 1,
+        "s2mel_dit_cuda_graph_max_graphs": 8,
         # Default-off performance tracing for IndexTTS2 overhead analysis.
     }
 
@@ -161,9 +166,11 @@ class IndexTTS2Config(PretrainedConfig):
         # Keep gpt.model_dim in sync with top-level hidden_size.
         if isinstance(self.gpt, dict) and self.gpt.get("model_dim") != self.hidden_size:
             self.gpt["model_dim"] = self.hidden_size
-        self.output_sample_rate = int(
-            self.s2mel["preprocess_params"].get("sr", 22050) if isinstance(self.s2mel, dict) else 22050
-        )
+        if not isinstance(self.s2mel, dict) or not isinstance(self.s2mel.get("preprocess_params"), dict):
+            raise ValueError("IndexTTS2 config requires s2mel.preprocess_params")
+        if "sr" not in self.s2mel["preprocess_params"]:
+            raise ValueError("IndexTTS2 config requires s2mel.preprocess_params.sr")
+        self.output_sample_rate = int(self.s2mel["preprocess_params"]["sr"])
 
 
 class IndexTTS25Config(IndexTTS2Config):
@@ -189,6 +196,7 @@ class IndexTTS25Config(IndexTTS2Config):
             "semantic_codec_type": "enhanced",
             "use_gpt_latent": False,
             "version": 2.5,
+            "conditioning_prefix_tokens": 3,
         }
     )
 

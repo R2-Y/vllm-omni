@@ -30,6 +30,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
+from vllm_omni.config.stage_config import get_required_config_field
+
 from .compat import (
     fp32_precision,
     get_pad_id,
@@ -262,7 +264,15 @@ class DuplexEARTTS(nn.Module):
         aligned_attention_mask = batch["aligned_attention_mask"]
         aligned_position_ids = batch["aligned_position_ids"]
 
-        if self.training and (self.cfg.get("empty_turn_probability", 0.0) > 0):
+        if self.training and (
+            get_required_config_field(
+                self.cfg,
+                "empty_turn_probability",
+                expected_type=float,
+                model="nemotron_voicechat",
+            )
+            > 0
+        ):
             # Randomly decide whether this batch gets emptied
             if torch.rand(1).item() < self.cfg.empty_turn_probability:
                 # Zero out audio
@@ -323,7 +333,15 @@ class DuplexEARTTS(nn.Module):
         target_codes_aligned[row_idx, pos] = self.speech_pad_id
 
         # EOS dropout to make the model more robust
-        if self.training and self.cfg.get("text_eos_dropout_prob", 0.0) > 0:
+        if self.training and (
+            get_required_config_field(
+                self.cfg,
+                "text_eos_dropout_prob",
+                expected_type=float,
+                model="nemotron_voicechat",
+            )
+            > 0
+        ):
             # Mask EOS positions
             eos_mask = target_text_tokens == self.text_eos_id
 
@@ -340,7 +358,15 @@ class DuplexEARTTS(nn.Module):
             )
 
         # BOS dropout to make the model more robust
-        if self.training and self.cfg.get("text_bos_dropout_prob", 0.0) > 0:
+        if self.training and (
+            get_required_config_field(
+                self.cfg,
+                "text_bos_dropout_prob",
+                expected_type=float,
+                model="nemotron_voicechat",
+            )
+            > 0
+        ):
             # Mask BOS positions
             bos_mask = target_text_tokens == self.text_bos_id
 
@@ -359,7 +385,15 @@ class DuplexEARTTS(nn.Module):
             )
 
         # BOS dropout to make the model more robust
-        if self.training and self.cfg.get("text_bos_dropout_prob", 0.0) > 0:
+        if self.training and (
+            get_required_config_field(
+                self.cfg,
+                "text_bos_dropout_prob",
+                expected_type=float,
+                model="nemotron_voicechat",
+            )
+            > 0
+        ):
             prob = self.cfg.text_bos_dropout_prob  # e.g., 0.5
 
             # Identify all BOS positions [B, T]
@@ -434,9 +468,28 @@ class DuplexEARTTS(nn.Module):
         """Get default generation config for EAR-TTS."""
         return {
             "num_iter": 8,
-            "guidance_scale": self.cfg.get("inference_guidance_scale", 0.5) if guidance_enabled else None,
-            "top_p_or_k": self.cfg.get("inference_top_p_or_k", 0.8),
-            "noise_scale": self.cfg.get("inference_noise_scale", 0.8),
+            "guidance_scale": (
+                get_required_config_field(
+                    self.cfg,
+                    "inference_guidance_scale",
+                    expected_type=float,
+                    model="nemotron_voicechat",
+                )
+                if guidance_enabled
+                else None
+            ),
+            "top_p_or_k": get_required_config_field(
+                self.cfg,
+                "inference_top_p_or_k",
+                expected_type=float,
+                model="nemotron_voicechat",
+            ),
+            "noise_scale": get_required_config_field(
+                self.cfg,
+                "inference_noise_scale",
+                expected_type=float,
+                model="nemotron_voicechat",
+            ),
             "eos_threshold": -3.0,
         }
 

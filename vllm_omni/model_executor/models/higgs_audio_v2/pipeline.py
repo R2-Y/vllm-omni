@@ -6,7 +6,12 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
+    get_required_config_field,
+    pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
 )
+
+from .configuration_higgs_audio_v2 import HiggsAudioV2Config
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.higgs_audio_v2"
 
@@ -26,12 +31,6 @@ HIGGS_AUDIO_V2_PIPELINE = PipelineConfig(
             async_chunk_process_next_stage_input_func=(f"{_PROC}.talker2code2wav_async_chunk"),
             sampling_constraints={
                 "detokenize": False,
-                # Two stop signals for Stage-0:
-                #   * 128009 = standard LM eos_token_id (sequence-level stop)
-                #   * 128012 = audio_eos_token_id (forced by the talker's
-                #     _apply_audio_mode_bias at audio-ramp completion; matches
-                #     upstream HiggsAudioModel._sample_audio_tokens override).
-                "stop_token_ids": [128009, 128012],
             },
         ),
         StagePipelineConfig(
@@ -48,3 +47,20 @@ HIGGS_AUDIO_V2_PIPELINE = PipelineConfig(
         ),
     ),
 )
+
+
+@pipeline_cfg_resolver(
+    config_type=HiggsAudioV2Config,
+    default_pipeline_config=HIGGS_AUDIO_V2_PIPELINE,
+)
+def resolve_higgs_audio_v2_pipeline(hf_config: HiggsAudioV2Config) -> PipelineConfig:
+    """Use the checkpoint's sequence and audio-ramp termination tokens."""
+    stop_token_ids = [
+        get_required_config_field(hf_config, field, expected_type=int, model="higgs_audio_v2")
+        for field in ("eos_token_id", "audio_eos_token_id")
+    ]
+    return replace_stage_sampling_constraints(
+        HIGGS_AUDIO_V2_PIPELINE,
+        stage_id=0,
+        updates={"stop_token_ids": stop_token_ids},
+    )

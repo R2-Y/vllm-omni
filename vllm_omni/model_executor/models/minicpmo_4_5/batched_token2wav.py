@@ -14,10 +14,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
+
 from .cuda_graph_wrapper import CFMGraphWrapper, HiFTGraphWrapper
 
 logger = init_logger(__name__)
 
+# Codec lookahead uses the checkpoint's fixed silence code, not a text token.
 _SILENCE_TOKEN = 4218
 
 
@@ -146,7 +149,12 @@ class BatchedToken2Wav(nn.Module):
                     raise ValueError(
                         "MiniCPM-o HiFT CUDA Graph requires source_cache_len to be divisible by mel_cache_len"
                     )
-                capture_batch_sizes = graph_config.get("capture_batch_sizes", [1])
+                capture_batch_sizes = get_required_config_field(
+                    graph_config,
+                    "capture_batch_sizes",
+                    expected_type=list,
+                    model="minicpmo_4_5",
+                )
                 logger.info("Enabling HiFT CUDA Graph with batch sizes %s", capture_batch_sizes)
                 self.hift_graph_wrapper = HiFTGraphWrapper(
                     token2wav=token2wav,
@@ -162,11 +170,17 @@ class BatchedToken2Wav(nn.Module):
             flow_parameter = next(self.flow.parameters(), None)
             if flow_parameter is not None and flow_parameter.device.type == "cuda":
                 estimator = self.flow.decoder.estimator
+                max_graphs = get_required_config_field(
+                    cfm_graph_cfg,
+                    "max_graphs",
+                    expected_type=int,
+                    model="minicpmo_4_5",
+                )
                 self._cfm_graph_wrapper = CFMGraphWrapper(
                     graph_fn=estimator.blocks_forward_chunk,
-                    max_graphs=int(cfm_graph_cfg.get("max_graphs", 32)),
+                    max_graphs=max_graphs,
                 )
-                logger.info("CFM CUDA Graph enabled (max_graphs=%d)", int(cfm_graph_cfg.get("max_graphs", 32)))
+                logger.info("CFM CUDA Graph enabled (max_graphs=%d)", max_graphs)
             else:
                 logger.info(
                     "CFM CUDA Graph is disabled on device type %s",

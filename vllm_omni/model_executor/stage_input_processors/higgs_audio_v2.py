@@ -44,6 +44,7 @@ _DEFAULT_CODEC_LEFT_CONTEXT_FRAMES = 25
 # so this module remains usable without circular imports during
 # stage-input-processor discovery.
 _NUM_CODEBOOKS = 8
+# Must mirror the codec stream's one-past-codebook BOS/EOS ramp protocol.
 _AUDIO_STREAM_BOS_ID = 1024
 _AUDIO_STREAM_EOS_ID = 1025
 _NUM_REAL_CODES = _AUDIO_STREAM_BOS_ID  # codes in [0, 1023] are real

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _QWEN3_ROPE_THETA = 1_000_000
 
-_REQUIRED_SPECIALS = ("<|tts|>", "<|text|>", "<|audio|>")
+_REQUIRED_SPECIALS = ("<|tts|>", "<|text|>", "<|audio|>", "<|audio_end|>")
 
 
 def _build_text_config(raw: Any) -> PretrainedConfig:
@@ -93,6 +93,7 @@ class HiggsAudioV3Config(PretrainedConfig):
         tts_token_id: int | None = None,
         text_token_id: int | None = None,
         audio_continuation_id: int | None = None,
+        audio_end_token_id: int | None = None,
         enable_flashinfer_api_unwrap: bool = True,
         enable_mlp_cudagraph: bool = True,
         **kwargs: Any,
@@ -129,6 +130,7 @@ class HiggsAudioV3Config(PretrainedConfig):
         self.tts_token_id = tts_token_id
         self.text_token_id = text_token_id
         self.audio_continuation_id = audio_continuation_id
+        self.audio_end_token_id = audio_end_token_id
         self.enable_flashinfer_api_unwrap = bool(enable_flashinfer_api_unwrap)
         self.enable_mlp_cudagraph = bool(enable_mlp_cudagraph)
 
@@ -181,6 +183,7 @@ class HiggsAudioV3Config(PretrainedConfig):
         self.tts_token_id = vocab["<|tts|>"]
         self.text_token_id = vocab["<|text|>"]
         self.audio_continuation_id = vocab["<|audio|>"]
+        self.audio_end_token_id = vocab["<|audio_end|>"]
 
         if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
             self.eos_token_id = int(tokenizer.eos_token_id)

@@ -1,8 +1,9 @@
 # AURA Omni deploy profile: Qwen3-ASR -> AURA/Qwen3-VL -> Qwen3-TTS Talker -> Code2Wav.
 #
 # Pass `--deploy-config vllm_omni/deploy/aura_omni.yaml` and point the parent
-# `--model` at any local placeholder repo if needed; each stage overrides its
-# own model below.
+# `--model` at the same Qwen3-TTS checkpoint used by stages 2 and 3. Pipeline
+# startup resolves and validates codec sampling metadata from that config;
+# every stage still overrides its own model below.
 pipeline: aura_omni
 # AURA has a semantic ASR -> AURA -> TTS dependency. Do not prewarm downstream
 # stages before AURA text is converted into Qwen3-TTS metadata by aura2tts.
@@ -18,6 +19,7 @@ connectors:
       connector_get_max_wait: 300
       codec_chunk_frames: 25
       codec_left_context_frames: 72
+      ref_code_context_frames: 72
       initial_codec_chunk_frames: 1
       decode_cudagraph_capture_sizes: [25, 73, 97, 169, 325]
 

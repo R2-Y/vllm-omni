@@ -32,6 +32,7 @@ from vllm_omni.utils.speaker_cache import (
 from .configuration_qwen3_tts import Qwen3TTSConfig, Qwen3TTSSpeakerEncoderConfig, Qwen3TTSTalkerConfig
 from .prompt_embeds_builder import PRECOMPUTED_TEXT_IDS_KEY, Qwen3TTSPromptEmbedsBuilder
 from .qwen3_tts_code_predictor_vllm import Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM
+from .runtime_config import resolve_qwen3_tts_runtime_config
 from .tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Config
 from .tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Encoder
 
@@ -288,16 +289,12 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         self.model_path = vllm_config.model_config.model
         self.config: Qwen3TTSConfig = vllm_config.model_config.hf_config  # type: ignore[assignment]
         self.talker_config: Qwen3TTSTalkerConfig = self.config.talker_config
+        self.runtime_config = resolve_qwen3_tts_runtime_config(self.config)
 
         # Codec ids: only [0, codebook_vocab_size) are real code indices (layer-0 is sampled from talker vocab).
         # codec_eos_token_id is a special stop token and must not be decoded by SpeechTokenizer.
-        self._codebook_vocab_size = int(getattr(self.talker_config.code_predictor_config, "vocab_size", 0) or 0)
-        if self._codebook_vocab_size <= 0:
-            raise ValueError(
-                f"Invalid talker_config.code_predictor_config.vocab_size={self._codebook_vocab_size}; "
-                "cannot restrict codec logits safely."
-            )
-        self._codec_eos_token_id = int(getattr(self.talker_config, "codec_eos_token_id", -1))
+        self._codebook_vocab_size = self.runtime_config.codebook_size
+        self._codec_eos_token_id = self.runtime_config.codec_stop_token_id
 
         self.have_multimodal_outputs = True
         self.has_preprocess = True
@@ -500,7 +497,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         if not custom_voice_dir:
             return
 
-        expected_dim = int(getattr(self.config.speaker_encoder_config, "enc_dim", 0) or 0)
+        expected_dim = self.config.speaker_encoder_config.enc_dim
         loaded = 0
         for profile in iter_custom_voice_profiles(custom_voice_dir, expected_model_type="qwen3_tts"):
             tensors = load_validated_profile_tensors(
@@ -624,7 +621,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
 
         audio_codes = torch.cat(audio_codes_list, dim=0)
         span_len = int(audio_codes.shape[0])
-        mm: OmniPayload = {"codes": {"audio": audio_codes}}
+        mm: OmniPayload = {
+            "codes": {"audio": audio_codes},
+            "meta": self.runtime_config.to_payload_meta(),
+        }
         if ref_code_len_list:
             mm.setdefault("meta", {})["ref_code_len"] = torch.cat(ref_code_len_list, dim=0)[:span_len]
         if has_ref_code:

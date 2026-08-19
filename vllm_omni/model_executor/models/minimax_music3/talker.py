@@ -161,7 +161,7 @@ class MiniMaxMusic3TalkerForConditionalGeneration(nn.Module):
             vllm_config=vllm_config,
             prefix=f"{prefix}.model" if prefix else "model",
         )
-        if getattr(config, "tie_word_embeddings", False):
+        if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
             self.lm_head = ParallelLMHead(
@@ -199,10 +199,10 @@ class MiniMaxMusic3TalkerForConditionalGeneration(nn.Module):
         )
         self.frame_embedding_scale = float(NUM_CODEBOOKS) ** -0.5
 
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        scheduler_config = vllm_config.scheduler_config
         # Guidance doubles the rows, so the batch is twice the admitted
         # request count.
-        self._max_rows = max(64, 2 * int(getattr(scheduler_config, "max_num_seqs", 16)))
+        self._max_rows = max(64, 2 * int(scheduler_config.max_num_seqs))
 
         # Per-step scratch, rebuilt every step from request-keyed state.
         # Nothing here may survive a step: vLLM compacts and reorders the

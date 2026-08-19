@@ -91,6 +91,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.hunyuan_image3.autoencoder_kl_3d import AutoencoderKLConv3D
 from vllm_omni.model_executor.models.hunyuan_image3.siglip2 import LightProjector, Siglip2VisionTransformer
 
@@ -1117,7 +1118,12 @@ class HunyuanImage3MultiModalProcessor(BaseMultiModalProcessor[HunyuanImage3Proc
             timestep_token_num = 1
             vae_token_num = _vae_token_grid_hw[0] * _vae_token_grid_hw[1]
             hf_config = self.info.get_hf_config()
-            vit_token_num = hf_config.vit_processor.get("max_num_patches", 729)
+            vit_token_num = get_required_config_field(
+                hf_config,
+                "vit_processor.max_num_patches",
+                expected_type=int,
+                model="hunyuan_image3",
+            )
 
             base_size_token_id = tokenizer.convert_tokens_to_ids(f"<img_size_{_base_size}>")
             if base_size_token_id is None:
@@ -1503,7 +1509,12 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
 
-            logit_scale = getattr(config, "logit_scale", 1.0)
+            logit_scale = get_required_config_field(
+                config,
+                "logit_scale",
+                expected_type=float,
+                model="hunyuan_image3",
+            )
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, config.vocab_size, logit_scale)
         else:
             self.lm_head = PPMissingLayer()
@@ -1544,7 +1555,12 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         self._mrope_boi_token_id = tokenizer.convert_tokens_to_ids("<boi>")
         self._mrope_eoi_token_id = tokenizer.convert_tokens_to_ids("<eoi>")
         self._mrope_joint_img_sep_token_id = tokenizer.convert_tokens_to_ids("<joint_img_sep>")
-        self._mrope_max_num_patches = config.vit_processor.get("max_num_patches", 729)
+        self._mrope_max_num_patches = get_required_config_field(
+            config,
+            "vit_processor.max_num_patches",
+            expected_type=int,
+            model="hunyuan_image3",
+        )
 
         # Special token IDs for logits processors (stage transitions).
         # These mirror the official tokenization_hunyuan_image_3.py setup.
@@ -1553,7 +1569,12 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         self._end_of_recaption_id = tokenizer.convert_tokens_to_ids("</recaption>")
         self._answer_id = tokenizer.convert_tokens_to_ids("<answer>")
         self._end_of_answer_id = tokenizer.convert_tokens_to_ids("</answer>")
-        image_base_size = getattr(config, "image_base_size", 1024)
+        image_base_size = get_required_config_field(
+            config,
+            "image_base_size",
+            expected_type=int,
+            model="hunyuan_image3",
+        )
         self._size_token_id = tokenizer.convert_tokens_to_ids(f"<img_size_{image_base_size}>")
         self._timestep_token_id = tokenizer.convert_tokens_to_ids("<timestep>")
         self._start_ratio_id = tokenizer.convert_tokens_to_ids("<img_ratio_0>")
@@ -1683,7 +1704,12 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
     def _replace_rotary_embeddings(self):
         """Replace vLLM's standard MRotaryEmbedding with the custom
         interleaved 2D RoPE that matches the original HunyuanImage3 model."""
-        rope_theta = getattr(self.config, "rope_theta", 10000.0)
+        rope_theta = get_required_config_field(
+            self.config,
+            "rope_theta",
+            expected_type=float,
+            model="hunyuan_image3",
+        )
         head_dim = getattr(
             self.config,
             "head_dim",

@@ -9,8 +9,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-STOP_MEL_TOKEN = 8193
-
 
 def _cpu_view(tensor: torch.Tensor) -> torch.Tensor:
     """Return a contiguous CPU tensor suitable for connector serialization.
@@ -27,7 +25,8 @@ def _cpu_view(tensor: torch.Tensor) -> torch.Tensor:
 def _strip_stop_token(
     codes: torch.Tensor,
     latent: torch.Tensor | None,
-    stop_mel_token: int = STOP_MEL_TOKEN,
+    *,
+    stop_mel_token: int,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     """Strip at the first stop token, matching official IndexTTS2 v2.
 
@@ -130,10 +129,15 @@ def _build_s2mel_additional_information(
     meta: dict[str, Any],
     *,
     use_gpt_latent: bool,
+    stop_mel_token: int,
     context: str,
 ) -> dict[str, Any]:
     """Build the Stage-1 S2Mel tensor contract shared by legacy and connector paths."""
-    mel_codes_clean, latent_clean, code_lens = _strip_stop_token(mel_codes, latent)
+    mel_codes_clean, latent_clean, code_lens = _strip_stop_token(
+        mel_codes,
+        latent,
+        stop_mel_token=stop_mel_token,
+    )
 
     additional_information = {
         "mel_codes": _cpu_view(mel_codes_clean),
@@ -222,6 +226,14 @@ def talker2s2mel_full_payload(
     if use_gpt_latent_value is None:
         raise ValueError(f"IndexTTS payload is missing meta.use_gpt_latent for req={rid}")
     use_gpt_latent = bool(use_gpt_latent_value)
+    stop_mel_token_value = _get_payload_value(
+        pooling_output,
+        "meta.stop_mel_token",
+        "meta",
+        "stop_mel_token",
+    )
+    if isinstance(stop_mel_token_value, bool) or not isinstance(stop_mel_token_value, int):
+        raise ValueError(f"IndexTTS payload is missing integer meta.stop_mel_token for req={rid}")
     payload_latent = _get_payload_value(
         pooling_output,
         "hidden_states.latent",
@@ -280,6 +292,7 @@ def talker2s2mel_full_payload(
         latent_seq,
         meta,
         use_gpt_latent=use_gpt_latent,
+        stop_mel_token=stop_mel_token_value,
         context="full_payload",
     )
     seed = _request_seed(request)

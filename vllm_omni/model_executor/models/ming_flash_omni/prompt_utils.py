@@ -37,15 +37,9 @@ _IMAGE_OPEN_TOKEN = "<image>"
 _IMAGE_CLOSE_TOKEN = "</image>"
 IMAGE_PATCH_TOKEN = "<imagePatch>"
 
-# Default query-token count matches ``MingImageGenConfig(img_gen_scales=[16])``
-# (16 * 16 = 256), which is what the released inclusionAI/Ming-flash-omni-2.0
-# checkpoint ships.
-DEFAULT_NUM_QUERY_TOKENS = 256
-
-
 def maybe_expand_image_gen_prompt(
     prompt: str,
-    num_query_tokens: int = DEFAULT_NUM_QUERY_TOKENS,
+    num_query_tokens: int,
 ) -> str:
     """Append the ``<image><imagePatch>*N</image>`` suffix for text-to-image.
 
@@ -132,7 +126,6 @@ def create_instruction(user_input: Any) -> str | None:
 
 __all__ = [
     "IMAGE_PATCH_TOKEN",
-    "DEFAULT_NUM_QUERY_TOKENS",
     "maybe_expand_image_gen_prompt",
     "DEFAULT_PROMPT",
     "BASE_CAPTION_TEMPLATE",

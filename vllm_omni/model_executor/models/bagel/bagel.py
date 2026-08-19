@@ -39,6 +39,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.transformers_utils.processors.bagel import BagelProcessor
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.bagel.autoencoder import (
     AutoEncoderParams,
@@ -143,9 +144,16 @@ class OmniBagelProcessingInfo(BaseProcessingInfo):
                     npos = f.get_slice("latent_pos_embed.pos_embed").get_shape()[0]
                     side = isqrt(npos)
                     if side * side == npos:
-                        old = getattr(config, "max_latent_size", 32)
+                        old = get_required_config_field(
+                            config,
+                            "max_latent_size",
+                            expected_type=int,
+                            model="bagel",
+                        )
                         if old != side:
                             config.max_latent_size = side
+        except ValueError:
+            raise
         except Exception:
             pass
 
@@ -334,8 +342,18 @@ class OmniBagelMultiModalProcessor(BaseMultiModalProcessor[OmniBagelProcessingIn
             image_size = vit_config.image_size
             num_vit_patches = (image_size // vit_config.patch_size) ** 2
 
-            latent_patch_size = getattr(hf_config, "latent_patch_size", 2)
-            downsample = hf_config.vae_config.get("downsample", 8)
+            latent_patch_size = get_required_config_field(
+                hf_config,
+                "latent_patch_size",
+                expected_type=int,
+                model="bagel",
+            )
+            downsample = get_required_config_field(
+                hf_config,
+                "vae_config.downsample",
+                expected_type=int,
+                model="bagel",
+            )
             latent_downsample = downsample * latent_patch_size
 
             def get_img2img_replacement(item_idx: int):
@@ -346,7 +364,12 @@ class OmniBagelMultiModalProcessor(BaseMultiModalProcessor[OmniBagelProcessingIn
                         size = item.get_image_size(item_idx)
                         h, w = size.height, size.width
 
-                max_latent_size = getattr(hf_config, "max_latent_size", 32)
+                max_latent_size = get_required_config_field(
+                    hf_config,
+                    "max_latent_size",
+                    expected_type=int,
+                    model="bagel",
+                )
                 max_img_size = int(max_latent_size * latent_downsample)
                 stride = latent_downsample
                 scale = min(max_img_size / max(h, w), 1.0)
@@ -447,10 +470,20 @@ class OmniBagelForConditionalGeneration(BagelForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
-        self.latent_patch_size = getattr(config, "latent_patch_size", 2)
+        self.latent_patch_size = get_required_config_field(
+            config,
+            "latent_patch_size",
+            expected_type=int,
+            model="bagel",
+        )
         self.downsample = config.vae_config.get("downsample")
         self.latent_downsample = self.downsample * self.latent_patch_size
-        self.max_latent_size = getattr(config, "max_latent_size", 32)
+        self.max_latent_size = get_required_config_field(
+            config,
+            "max_latent_size",
+            expected_type=int,
+            model="bagel",
+        )
         self.latent_channel = config.vae_config.get("z_channels")
 
         hidden_size = config.llm_config.hidden_size

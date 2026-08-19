@@ -31,10 +31,6 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 logger = init_logger(__name__)
 
-# Official cap on decoded frames (~10 s of audio at the codec frame rate).
-_DEFAULT_MAX_TTA_FRAMES = 500
-
-
 def _meta_str(value: Any) -> str | None:
     if isinstance(value, list | tuple):
         return _meta_str(value[0]) if value else None
@@ -79,8 +75,8 @@ class AudexXCodec1(nn.Module):
         config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
         self.codec = AutoModel.from_config(config, trust_remote_code=True)
         self.codec.eval()
-        self._sample_rate = int(getattr(config, "sampling_rate", 16000))
-        self._max_frames = int(getattr(config, "max_tta_frames", _DEFAULT_MAX_TTA_FRAMES))
+        self._sample_rate = int(config.sampling_rate)
+        self._max_frames = int(config.max_tta_frames)
 
     # -------------------- vLLM model interface --------------------
 

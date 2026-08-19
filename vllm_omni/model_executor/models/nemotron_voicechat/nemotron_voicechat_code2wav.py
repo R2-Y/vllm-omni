@@ -24,6 +24,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 logger = init_logger(__name__)
@@ -67,12 +68,20 @@ class NemotronVoiceChatCode2Wav(nn.Module):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
-        codec_cfg = getattr(self.config, "code2wav_config", None)
-        self._num_quantizers = int(getattr(codec_cfg, "num_quantizers", 31))
-        self._codebook_size = int(getattr(codec_cfg, "codebook_size", 1024))
-        self._sample_rate = int(getattr(codec_cfg, "sample_rate", 22050))
+        codec_cfg = self.config.code2wav_config
+        self._num_quantizers = get_required_config_field(
+            codec_cfg, "num_quantizers", expected_type=int, model="nemotron_voicechat"
+        )
+        self._codebook_size = get_required_config_field(
+            codec_cfg, "codebook_size", expected_type=int, model="nemotron_voicechat"
+        )
+        self._sample_rate = get_required_config_field(
+            codec_cfg, "sample_rate", expected_type=int, model="nemotron_voicechat"
+        )
         # Samples per 12.5 Hz frame (streaming chunks slice new audio by frame).
-        self._wav_per_frame = int(getattr(codec_cfg, "wav_to_token_ratio", 1764))
+        self._wav_per_frame = get_required_config_field(
+            codec_cfg, "wav_to_token_ratio", expected_type=int, model="nemotron_voicechat"
+        )
 
         # Runner-facing capability flags (same contract as PersonaPlexCode2Wav).
         self.have_multimodal_outputs = True

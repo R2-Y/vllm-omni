@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.diffusion.model_loader.hub_prefetch import _repo_prefetch_lock
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
@@ -223,10 +224,25 @@ class IndexTTS2S2MelDecoder(nn.Module):
         )
 
         # Diffusion config — configurable via deploy YAML hf_overrides
-        self.diffusion_steps: int = getattr(self.config, "diffusion_steps", 25)
-        self.inference_cfg_rate: float = getattr(self.config, "inference_cfg_rate", 0.7)
+        self.diffusion_steps = get_required_config_field(
+            self.config,
+            "diffusion_steps",
+            expected_type=int,
+            model="indextts2",
+        )
+        self.inference_cfg_rate = get_required_config_field(
+            self.config,
+            "inference_cfg_rate",
+            expected_type=float,
+            model="indextts2",
+        )
         self.mel_code_to_frame_ratio: float = 1.72
-        self.s2mel_cfm_batch_size: int = int(getattr(self.config, "s2mel_cfm_batch_size", 1))
+        self.s2mel_cfm_batch_size = get_required_config_field(
+            self.config,
+            "s2mel_cfm_batch_size",
+            expected_type=int,
+            model="indextts2",
+        )
         if self.s2mel_cfm_batch_size < 1:
             raise ValueError("s2mel_cfm_batch_size must be at least 1")
 
@@ -263,7 +279,12 @@ class IndexTTS2S2MelDecoder(nn.Module):
             )
         )
         self._dit_runtime_configured = False
-        self.s2mel_dit_cuda_graph_max_graphs: int = int(getattr(self.config, "s2mel_dit_cuda_graph_max_graphs", 8))
+        self.s2mel_dit_cuda_graph_max_graphs = get_required_config_field(
+            self.config,
+            "s2mel_dit_cuda_graph_max_graphs",
+            expected_type=int,
+            model="indextts2",
+        )
         self.s2mel_vocoder_capture_sizes: list[int] | None = getattr(self.config, "s2mel_vocoder_capture_sizes", None)
         self.s2mel_vocoder_compile_shapes: list[int] | None = getattr(self.config, "s2mel_vocoder_compile_shapes", None)
         logger.info(
@@ -367,7 +388,10 @@ class IndexTTS2S2MelDecoder(nn.Module):
                 # inputs and no upstream payload during engine initialization.
                 return OmniOutput(
                     text_hidden_states=torch.zeros(1, device=device),
-                    multimodal_outputs={"audio": torch.zeros(1, device=device), "sr": 22050},
+                    multimodal_outputs={
+                        "audio": torch.zeros(1, device=device),
+                        "sr": self.config.output_sample_rate,
+                    },
                 )
             raise ValueError("S2Mel decoder requires mel_codes" + (" and latent" if self.use_gpt_latent else ""))
 
@@ -398,7 +422,10 @@ class IndexTTS2S2MelDecoder(nn.Module):
                 code_lens = torch.tensor(code_lens_list, device=device, dtype=torch.long)
         else:
             # Strip stop token (8193) and compute actual length
-            stop_token = self.config.gpt.get("stop_mel_token", 8193)
+            try:
+                stop_token = self.config.gpt["stop_mel_token"]
+            except KeyError as exc:
+                raise ValueError("IndexTTS2 config requires gpt.stop_mel_token") from exc
             code_lens_list = []
             for i in range(mel_codes.shape[0]):
                 stop_mask = (mel_codes[i] == stop_token).nonzero(as_tuple=False)
@@ -435,7 +462,12 @@ class IndexTTS2S2MelDecoder(nn.Module):
                 None,
             ),
         )
-        codebook_size = self.config.semantic_codec.get("codebook_size", 8192)
+        codebook_size = get_required_config_field(
+            self.config,
+            "semantic_codec.codebook_size",
+            expected_type=int,
+            model="indextts2",
+        )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "mel_codes debug: shape=%s, min=%d, max=%d",
@@ -494,7 +526,12 @@ class IndexTTS2S2MelDecoder(nn.Module):
                 s_ref_codes = s_ref.long()
                 if s_ref_codes.ndim == 1:
                     s_ref_codes = s_ref_codes.unsqueeze(0)  # [1, T]
-                codebook_size = self.config.semantic_codec.get("codebook_size", 8192)
+                codebook_size = get_required_config_field(
+                    self.config,
+                    "semantic_codec.codebook_size",
+                    expected_type=int,
+                    model="indextts2",
+                )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "S_ref debug: shape=%s, min=%d, max=%d, codebook_size=%d",
@@ -618,10 +655,11 @@ class IndexTTS2S2MelDecoder(nn.Module):
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "[S2Mel] step6 BigVGAN done → wav=%s min=%.1f max=%.1f sr=22050",
+                "[S2Mel] step6 BigVGAN done → wav=%s min=%.1f max=%.1f sr=%d",
                 wav.shape if isinstance(wav, torch.Tensor) else [w.shape for w in wav],
                 wav.min().item() if isinstance(wav, torch.Tensor) else min(w.min().item() for w in wav),
                 wav.max().item() if isinstance(wav, torch.Tensor) else max(w.max().item() for w in wav),
+                self.config.output_sample_rate,
             )
 
         audio_cpu = [w.cpu() for w in wav] if isinstance(wav, list) else wav.cpu()
@@ -630,7 +668,7 @@ class IndexTTS2S2MelDecoder(nn.Module):
             text_hidden_states=None,
             multimodal_outputs={
                 "audio": audio_cpu,
-                "sr": torch.tensor(22050, dtype=torch.int32),
+                "sr": torch.tensor(self.config.output_sample_rate, dtype=torch.int32),
             },
         )
 
@@ -958,7 +996,10 @@ class IndexTTS2S2MelDecoder(nn.Module):
         torch.Tensor | None,
         list[int],
     ]:
-        stop_token = self.config.gpt.get("stop_mel_token", 8193)
+        try:
+            stop_token = self.config.gpt["stop_mel_token"]
+        except KeyError as exc:
+            raise ValueError("IndexTTS2 config requires gpt.stop_mel_token") from exc
         mel_items: list[torch.Tensor] = []
         latent_items: list[torch.Tensor] = []
         code_lens: list[int] = []

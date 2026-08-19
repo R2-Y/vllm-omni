@@ -96,6 +96,7 @@ def test_indextts25_prompt_len_uses_three_conditioning_tokens(monkeypatch):
         model_type="indextts2_5",
         lang="en",
         text_normalization=False,
+        hf_config=prompt_utils.IndexTTS25Config(),
     )
 
     # Official prepare_gpt_inputs wraps the language-prefixed tokenizer IDs
@@ -123,6 +124,7 @@ def test_indextts25_prompt_len_uses_custom_tokenizer_file(monkeypatch):
         "hello",
         model_type="indextts2_5",
         tokenizer_file="custom-tokenizer.tiktoken",
+        hf_config=prompt_utils.IndexTTS25Config(),
     )
 
     assert captured["tokenizer_file"] == "custom-tokenizer.tiktoken"
@@ -140,6 +142,7 @@ def test_indextts25_prompt_len_filters_existing_text_wrapper_ids(monkeypatch):
         "hello",
         model_type="indextts2_5",
         lang="en",
+        hf_config=prompt_utils.IndexTTS25Config(),
     )
 
     assert prompt_len == 3 + (2 + 2) + 1
@@ -171,6 +174,7 @@ def test_indextts2_prompt_len_ignores_v25_tokenizer_file(monkeypatch):
         "hello",
         model_type="indextts2",
         tokenizer_file="custom.tiktoken",
+        hf_config=prompt_utils.IndexTTS2Config(),
     )
 
     assert prompt_len == 34 + (2 + 2) + 1

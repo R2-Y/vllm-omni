@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.glm_tts.glm_tts import (
     resolve_glm_tts_model_dir,
 )
@@ -246,8 +247,8 @@ class GLMTTSDiTForGeneration(nn.Module):
         config = vllm_config.model_config.hf_config
         self.config = config
         self.model_stage = "glm_tts_dit"
-        self.max_num_seqs = int(getattr(vllm_config.scheduler_config, "max_num_seqs", 1))
-        self._use_dit_cuda_graphs = bool(getattr(config, "use_dit_cuda_graphs", False))
+        self.max_num_seqs = int(vllm_config.scheduler_config.max_num_seqs)
+        self._use_dit_cuda_graphs = bool(config.use_dit_cuda_graphs)
         self._dit_cudagraph: CUDAGraphGLMTTSDiTWrapper | None = None
         self._codec_chunk_frames, self._codec_left_context_frames = self._connector_chunk_config(vllm_config)
 
@@ -263,9 +264,21 @@ class GLMTTSDiTForGeneration(nn.Module):
         self.hf_flow_config = _load_glm_tts_flow_config(flow_dir)
         logger.info("GLM-TTS flow config: %s", self.hf_flow_config)
 
-        self.mel_dim = self.hf_flow_config.get("mel_dim", 80)
-        self.input_frame_rate = self.hf_flow_config.get("input_frame_rate", 25.0)
-        self.mel_framerate = self.hf_flow_config.get("mel_framerate", 50)
+        self.mel_dim = get_required_config_field(
+            self.hf_flow_config, "mel_dim", expected_type=int, model="glm_tts"
+        )
+        self.input_frame_rate = get_required_config_field(
+            self.hf_flow_config,
+            "input_frame_rate",
+            expected_type=float,
+            model="glm_tts",
+        )
+        self.mel_framerate = get_required_config_field(
+            self.hf_flow_config,
+            "mel_framerate",
+            expected_type=int,
+            model="glm_tts",
+        )
         self.sample_rate = self.hf_flow_config.get("sample_rate", _GLM_TTS_RUNTIME_FLOW_DEFAULTS["sample_rate"])
 
         self.n_timesteps = self.hf_flow_config.get("n_timesteps", _GLM_TTS_RUNTIME_FLOW_DEFAULTS["n_timesteps"])

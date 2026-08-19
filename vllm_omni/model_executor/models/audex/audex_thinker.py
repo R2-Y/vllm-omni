@@ -188,8 +188,8 @@ class NemotronDenseDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        attention_bias = getattr(config, "attention_bias", False) or getattr(config, "bias", False)
+        max_position_embeddings = config.max_position_embeddings
+        attention_bias = config.attention_bias
         self.self_attn = NemotronDenseAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -206,7 +206,7 @@ class NemotronDenseDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
-            bias=getattr(config, "mlp_bias", False),
+            bias=config.mlp_bias,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = NemotronDenseRMSNorm(config.hidden_size, eps=config.norm_eps)
@@ -380,7 +380,7 @@ class NemotronDenseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
 
-            logit_scale = getattr(config, "logit_scale", 1.0)
+            logit_scale = config.logit_scale
             self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
         else:
             self.lm_head = PPMissingLayer()

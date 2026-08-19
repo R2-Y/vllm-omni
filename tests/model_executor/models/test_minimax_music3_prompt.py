@@ -104,11 +104,11 @@ class TestBuildCfgNullTokenIds:
     def test_length_is_preserved(self) -> None:
         """Equal length is what lets the two rows decode in lockstep."""
         ids = self._prompt_ids(12)
-        assert len(build_cfg_null_token_ids(ids)) == len(ids)
+        assert len(build_cfg_null_token_ids(ids, SPECIAL_TOKEN_IDS)) == len(ids)
 
     def test_body_is_replaced_and_framing_survives(self) -> None:
         ids = self._prompt_ids(12)
-        null = build_cfg_null_token_ids(ids)
+        null = build_cfg_null_token_ids(ids, SPECIAL_TOKEN_IDS)
         assert null[0] == SPECIAL_TOKEN_IDS["<|im_start|>"]
         assert null[-2] == SPECIAL_TOKEN_IDS["<|im_end|>"]
         assert null[-1] == SPECIAL_TOKEN_IDS["<|audio_start|>"]
@@ -117,7 +117,7 @@ class TestBuildCfgNullTokenIds:
     def test_input_is_not_mutated(self) -> None:
         ids = self._prompt_ids(6)
         before = list(ids)
-        build_cfg_null_token_ids(ids)
+        build_cfg_null_token_ids(ids, SPECIAL_TOKEN_IDS)
         assert ids == before
 
     def test_minimal_prompt_with_empty_body(self) -> None:
@@ -127,15 +127,15 @@ class TestBuildCfgNullTokenIds:
             SPECIAL_TOKEN_IDS["<|im_end|>"],
             SPECIAL_TOKEN_IDS["<|audio_start|>"],
         ]
-        assert build_cfg_null_token_ids(ids) == ids
+        assert build_cfg_null_token_ids(ids, SPECIAL_TOKEN_IDS) == ids
 
     def test_too_short_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="too short"):
-            build_cfg_null_token_ids([1, 2, 3])
+            build_cfg_null_token_ids([1, 2, 3], SPECIAL_TOKEN_IDS)
 
     def test_wrong_framing_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="framing"):
-            build_cfg_null_token_ids([9, 9, 9, 9, 9])
+            build_cfg_null_token_ids([9, 9, 9, 9, 9], SPECIAL_TOKEN_IDS)
 
 
 class TestChunkWindows:

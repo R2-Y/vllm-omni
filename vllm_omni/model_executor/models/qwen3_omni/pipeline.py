@@ -15,6 +15,10 @@ from vllm_omni.config.stage_config import (
     StageExecutionType,
     StagePipelineConfig,
     pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
+)
+from vllm_omni.model_executor.models.qwen3_omni.runtime_config import (
+    resolve_qwen3_omni_runtime_config,
 )
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.qwen3_omni"
@@ -57,7 +61,6 @@ QWEN3_OMNI_PIPELINE = PipelineConfig(
             async_chunk_process_next_stage_input_func=(f"{_PROC}.talker2code2wav_async_chunk"),
             sampling_constraints={
                 "detokenize": False,
-                "stop_token_ids": [2150],
             },
         ),
         StagePipelineConfig(
@@ -95,7 +98,10 @@ QWEN3_OMNI_THINKER_ONLY_PIPELINE = PipelineConfig(
 )
 
 
-@pipeline_cfg_resolver(config_type=Qwen3OmniMoeConfig)
+@pipeline_cfg_resolver(
+    config_type=Qwen3OmniMoeConfig,
+    default_pipeline_config=QWEN3_OMNI_PIPELINE,
+)
 def resolve_qwen3_omni_pipeline(
     hf_config: Qwen3OmniMoeConfig,
 ) -> PipelineConfig:
@@ -107,4 +113,12 @@ def resolve_qwen3_omni_pipeline(
     # If we have a config and it explicitly disabled audio input, load thinker only
     if not hf_config.enable_audio_output:
         return QWEN3_OMNI_THINKER_ONLY_PIPELINE
-    return QWEN3_OMNI_PIPELINE
+    runtime_config = resolve_qwen3_omni_runtime_config(hf_config)
+    return replace_stage_sampling_constraints(
+        QWEN3_OMNI_PIPELINE,
+        stage_id=1,
+        updates={
+            "stop_token_ids": [runtime_config.sampled_stop_token_id],
+            "extra_args": runtime_config.to_sampling_extra_args(),
+        },
+    )

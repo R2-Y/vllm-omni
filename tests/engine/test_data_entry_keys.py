@@ -76,6 +76,19 @@ class TestOmniPayloadStruct:
         d = to_dict(s)
         assert d == {"meta": {"left_context_size": 10}}
 
+    def test_model_runtime_is_opaque_and_round_trips(self):
+        model_runtime = {"example_model": {"custom_id": 17}}
+        payload = {"meta": {"model_runtime": model_runtime}}
+
+        struct = to_struct(payload)
+
+        assert struct.meta.model_runtime == model_runtime
+        assert to_dict(struct) == payload
+        assert flatten_payload(payload) == {
+            "meta.model_runtime": model_runtime,
+        }
+        assert unflatten_payload({"meta.model_runtime": model_runtime}) == payload
+
     def test_struct_with_all_categories(self):
         d = {
             "hidden_states": {"output": torch.zeros(1), "last": torch.ones(2, 4)},
@@ -314,6 +327,30 @@ class TestFlattenUnflattenRoundTrip:
 
 
 class TestSerializeDeserializePayload:
+    def test_model_runtime_survives_transport_and_msgpack_round_trip(self):
+        from vllm_omni.distributed.omni_connectors.utils.serialization import (
+            OmniMsgpackDecoder,
+            OmniMsgpackEncoder,
+        )
+
+        original: OmniPayload = {
+            "meta": {
+                "model_runtime": {
+                    "mimo_audio": {
+                        "empty_token_id": 151667,
+                        "max_code2wav_tokens": 18192,
+                    }
+                }
+            }
+        }
+
+        wire = serialize_payload(original)
+        packed = OmniMsgpackEncoder().encode(wire)
+        unpacked = OmniMsgpackDecoder().decode(packed)
+        restored = deserialize_payload(unpacked)
+
+        assert restored == original
+
     def test_tensor_round_trip(self):
         original: OmniPayload = {
             "hidden_states": {"output": torch.tensor([[1.0, 2.0], [3.0, 4.0]])},

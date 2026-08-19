@@ -42,13 +42,10 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import (
-    NO_INTERLEAVE_NEXT_TOKEN_ID,
     PAD_GROUP_SIZE,
-    SPAN_CODEC_END_TOKEN_ID,
-    SPAN_CODEC_START_TOKEN_ID,
-    TALKER_CODEC_PAD_TOKEN_ID,
     TEXT_GROUP_SIZE,
     MiMoAudioConfig,
 )
@@ -61,12 +58,12 @@ logger = init_logger(__name__)
 def interleave_5_and_5_in_span(
     input_ids: list[int],
     *,
-    span_start_token: int = SPAN_CODEC_START_TOKEN_ID,
-    span_end_token: int = SPAN_CODEC_END_TOKEN_ID,
-    pad_token_id: int = TALKER_CODEC_PAD_TOKEN_ID,
+    span_start_token: int,
+    span_end_token: int,
+    pad_token_id: int,
+    no_interleave_next_token: int,
     text_group_size: int = TEXT_GROUP_SIZE,
     pad_group_size: int = PAD_GROUP_SIZE,
-    no_interleave_next_token: int = NO_INTERLEAVE_NEXT_TOKEN_ID,
 ) -> list[int]:
     """
     Interleave text tokens and padding tokens within spans marked by special tokens.
@@ -78,12 +75,12 @@ def interleave_5_and_5_in_span(
 
     Args:
         input_ids: Input token ID list
-        span_start_token: Token marking span start (default: 151670)
-        span_end_token: Token marking span end (default: 151672)
-        pad_token_id: Padding token ID (default: 151667)
-        text_group_size: Number of text tokens per group (default: 5)
-        pad_group_size: Number of padding tokens per group (default: 5)
-        no_interleave_next_token: Skip interleaving if this token follows span_end (default: 151671)
+        span_start_token: Token marking span start.
+        span_end_token: Token marking span end.
+        pad_token_id: Padding token ID.
+        no_interleave_next_token: Skip interleaving if this follows span_end.
+        text_group_size: Number of text tokens per group.
+        pad_group_size: Number of padding tokens per group.
 
     Returns:
         Processed token list with same length as input
@@ -119,8 +116,8 @@ def interleave_5_and_5_in_span(
         next_token = input_ids[next_pos] if next_pos < original_len else None
 
         # Rule:
-        # After "-end" is 151667(PAD) -> for interlacing
-        # After "-end" is 151671 -> Do not interlace
+        # A configured codec PAD after the span enables interleaving; the
+        # configured no-interleave marker explicitly disables it.
         do_interleave = next_token == pad_token_id
         if next_token == no_interleave_next_token:
             do_interleave = False
@@ -192,7 +189,12 @@ class MiMoAudioLLMProcessingInfo(
         return None
 
     def get_data_parser(self) -> MultiModalDataParser:
-        sampling_rate = 24000
+        sampling_rate = get_required_config_field(
+            self.get_hf_config(),
+            "audio_sample_rate",
+            expected_type=int,
+            model="mimo_audio",
+        )
         return MiMoAudioDataParser(target_sr=sampling_rate)
 
     def get_feature_extractor(
@@ -237,9 +239,15 @@ class MiMoAudioLLMDummyInputsBuilder(BaseDummyInputsBuilder[MiMoAudioLLMProcessi
         # Return dummy raw audio data (not encoded codes)
         # This will be processed by _parse_audio_data like real audio
         # Use 1 second of audio at target_sr (24000 Hz)
-        dummy_audio_length = mm_options.get("audio").length if mm_options else 24000  # 1 second at 24kHz
+        sampling_rate = get_required_config_field(
+            self.info.get_hf_config(),
+            "audio_sample_rate",
+            expected_type=int,
+            model="mimo_audio",
+        )
+        dummy_audio_length = mm_options.get("audio").length if mm_options else sampling_rate
         dummy_audio = np.zeros((dummy_audio_length,), dtype=np.float32)
-        return {"audio": [(dummy_audio, 24000)] * num_audios}
+        return {"audio": [(dummy_audio, sampling_rate)] * num_audios}
 
     def get_dummy_processor_inputs(
         self,
@@ -356,7 +364,12 @@ class MiMoAudioLLMMultiModalProcessor(BaseMultiModalProcessor[MiMoAudioLLMProces
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        sampling_rate = 24000
+        sampling_rate = get_required_config_field(
+            self.info.get_hf_config(),
+            "audio_sample_rate",
+            expected_type=int,
+            model="mimo_audio",
+        )
         audios = mm_data.pop("audios", [])
         tokenizer = self.info.get_tokenizer()
         if audios:
@@ -611,7 +624,13 @@ class MiMoAudioForConditionalGeneration(
         mm_features = info_dict.get("mm_features", [])
         mm_embeddings = []
         prompt_ids = torch.tensor(
-            interleave_5_and_5_in_span(input_ids.tolist()),
+            interleave_5_and_5_in_span(
+                input_ids.tolist(),
+                span_start_token=self.config.span_codec_start_token_id,
+                span_end_token=self.config.span_codec_end_token_id,
+                pad_token_id=self.config.empty_token_id,
+                no_interleave_next_token=self.config.no_interleave_next_token_id,
+            ),
             dtype=torch.int64,
             device=input_ids.device,
         )
@@ -663,12 +682,8 @@ class MiMoAudioForConditionalGeneration(
     ) -> None:
         """Optionally move thinker/talker/token2wav to different devices.
 
-        Example:
-            model.move_submodules_to_devices(
-                thinker_device='cuda:0',
-                talker_device='cuda:1',
-                token2wav_device='cpu',
-            )
+        Device placement is supplied by the caller; this helper has no
+        model-specific CUDA topology.
         """
         if llm_device is not None and self.fused_thinker_talker is not None:
             self.fused_thinker_talker.to(llm_device)

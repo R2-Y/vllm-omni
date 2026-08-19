@@ -15,6 +15,46 @@ import vllm_omni.model_executor.stage_input_processors.qwen3_omni as q3
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
+def _sampling_params_with_runtime(namespace: str, runtime: dict[str, int]) -> SimpleNamespace:
+    return SimpleNamespace(extra_args={"model_runtime": {namespace: runtime}})
+
+
+def _mimo_runtime(**updates: int) -> dict[str, int]:
+    runtime = {
+        "empty_token_id": 170100,
+        "span_codec_start_token_id": 170101,
+        "span_codec_end_token_id": 170102,
+        "no_interleave_next_token_id": 170103,
+        "speech_start_token_id": 170104,
+        "speech_end_token_id": 170105,
+        "endoftext_token_id": 170106,
+        "im_end_token_id": 170107,
+        "vocab_size": 200000,
+    }
+    runtime.update(updates)
+    return runtime
+
+
+def _runtime_meta(**updates):
+    values = {
+        "im_start_token_id": 11,
+        "system_token_id": 33,
+        "user_token_id": 22,
+        "assistant_token_id": 44,
+        "accept_hidden_layer": 7,
+        "codebook_size": 2048,
+        "codec_pad_token_id": 35,
+        "codec_bos_token_id": 36,
+        "sampled_stop_token_id": 37,
+    }
+    values.update(updates)
+    return values
+
+
+def _model_runtime(**updates):
+    return {"model_runtime": {"qwen3_omni": _runtime_meta(**updates)}}
+
+
 @pytest.fixture(autouse=True)
 def _streaming_context() -> SimpleNamespace:
     return SimpleNamespace(bridge_states={})
@@ -75,6 +115,55 @@ def test_get_streaming_codec_delta_len_increments_and_finishes(_streaming_contex
     assert d3 == 1
     state = q3._get_qwen3_streaming_state("c1", _streaming_context)
     assert state.talker2code2wav_last_seq_len == 0
+
+
+def test_sync_handoff_uses_runtime_role_ids_from_sampling_constraints() -> None:
+    output = SimpleNamespace(cumulative_token_ids=[9])
+    thinker_output = SimpleNamespace(
+        request_id="roles",
+        prompt_token_ids=[11, 22, 5, 6, 11, 44],
+        outputs=[output],
+        finished=True,
+    )
+    sampling_params = SimpleNamespace(extra_args=_model_runtime())
+
+    prompts = q3.thinker2talker_token_only(
+        [thinker_output],
+        sampling_params=sampling_params,
+    )
+
+    assert len(prompts[0]["prompt_token_ids"]) == 13
+
+
+def test_async_handoff_uses_runtime_hidden_layer_from_payload_meta() -> None:
+    request_id = "dynamic-layer"
+    transfer_manager = SimpleNamespace(
+        put_req_chunk=defaultdict(int, {request_id: 0}),
+        request_payload={},
+    )
+    request = SimpleNamespace(
+        external_req_id=request_id,
+        all_token_ids=[11, 22],
+        prompt_token_ids=[11, 22],
+        additional_information=None,
+    )
+    payload = q3.thinker2talker_async_chunk(
+        transfer_manager,
+        {
+            "hidden_states": {
+                "layers": {
+                    0: torch.ones(2, 3),
+                    7: torch.full((2, 3), 2.0),
+                }
+            },
+            "meta": _model_runtime(),
+        },
+        request,
+        is_finished=True,
+    )
+
+    assert payload is not None
+    assert torch.equal(payload.hidden_states.output, torch.full((2, 3), 2.0))
 
 
 def test_streaming_input_prefill_chunk_is_cached() -> None:
@@ -147,6 +236,7 @@ def test_talker2code2wav_full_payload_filters_by_output_token_ids() -> None:
     request = SimpleNamespace(
         request_id="codec",
         output_token_ids=[4197, 1, 2, 4198, -1, 2048],
+        sampling_params=SimpleNamespace(extra_args=_model_runtime()),
     )
     rows = torch.tensor(
         [
@@ -167,10 +257,25 @@ def test_talker2code2wav_full_payload_filters_by_output_token_ids() -> None:
     assert "code_predictor_codes" not in payload
 
 
+def test_full_payload_uses_request_codebook_size() -> None:
+    request = SimpleNamespace(
+        request_id="custom-codebook",
+        output_token_ids=[1, 40],
+        sampling_params=SimpleNamespace(extra_args=_model_runtime(codebook_size=32)),
+    )
+    rows = torch.tensor([[1, 2], [3, 4]], dtype=torch.long)
+
+    payload = q3.talker2code2wav_full_payload(None, {"codes.audio": rows}, request)
+
+    assert payload is not None
+    assert payload["codes"]["audio"] == [1, 2]
+
+
 def test_talker2code2wav_full_payload_drops_count_matched_terminal_row() -> None:
     request = SimpleNamespace(
         request_id="codec_terminal_row",
         output_token_ids=[0, 4198],
+        sampling_params=SimpleNamespace(extra_args=_model_runtime()),
     )
     rows = torch.tensor(
         [
@@ -188,6 +293,7 @@ def test_talker2code2wav_full_payload_drops_rows_aligned_to_non_codec_ids() -> N
     request = SimpleNamespace(
         request_id="codec_invalid_ids",
         output_token_ids=[4197, 0, 4198, 4196, -1, 2048],
+        sampling_params=SimpleNamespace(extra_args=_model_runtime()),
     )
     rows = torch.tensor(
         [
@@ -212,6 +318,7 @@ def test_talker2code2wav_full_payload_keeps_all_zero_codec_rows() -> None:
     request = SimpleNamespace(
         request_id="codec_zero",
         output_token_ids=[0, 1],
+        sampling_params=SimpleNamespace(extra_args=_model_runtime()),
     )
     rows = torch.tensor(
         [
@@ -281,6 +388,9 @@ def test_thinker2talker_full_payload_packs_complete_tensors() -> None:
         "hidden_states.layer_0": torch.ones(3, 2),
         "hidden_states.layer_24": torch.full((3, 2), 2.0),
         "embed.tts_bos": torch.zeros(1, 2),
+        "meta.model_runtime": _model_runtime(
+            accept_hidden_layer=24,
+        )["model_runtime"],
     }
 
     payload = q3.thinker2talker_full_payload(None, pooling_output, request)
@@ -308,7 +418,11 @@ def test_thinker2talker_token_only_preserves_voice_metadata() -> None:
         }
     }
 
-    [talker_prompt] = q3.thinker2talker_token_only(source_outputs, prompt)
+    [talker_prompt] = q3.thinker2talker_token_only(
+        source_outputs,
+        prompt,
+        sampling_params=SimpleNamespace(extra_args=_model_runtime()),
+    )
 
     assert talker_prompt["additional_information"] == {
         "speaker": ["ethan"],
@@ -376,7 +490,6 @@ def test_accumulator_concat_default_when_no_replace_keys() -> None:
 def test_covo_audio_llm2code2wav_token_only_smoke() -> None:
     """Smoke: covo_audio token-only builder returns placeholder prompts sized to audio_codes count."""
     # source_outputs is a list of objects with .outputs[0].token_ids
-    from vllm_omni.model_executor.models.covo_audio.config_covo_audio import COVO_AUDIO_TOKEN_INDEX
     from vllm_omni.model_executor.stage_input_processors.covo_audio import (
         llm2code2wav_token_only,
     )
@@ -384,13 +497,17 @@ def test_covo_audio_llm2code2wav_token_only_smoke() -> None:
     class _Out:
         def __init__(self, tids):
             self.token_ids = tids
+            self.sampling_params = _sampling_params_with_runtime(
+                "covo_audio",
+                {"audio_token_index": 170000, "eos_token_id": 160000, "vocab_size": 200000},
+            )
 
     class _Wrapper:
         def __init__(self, tids):
             self.outputs = [_Out(tids)]
 
     # 3 codec tokens + 2 non-codec
-    src = [_Wrapper([COVO_AUDIO_TOKEN_INDEX + 0, COVO_AUDIO_TOKEN_INDEX + 1, COVO_AUDIO_TOKEN_INDEX + 2, 100, 200])]
+    src = [_Wrapper([170000, 170001, 170002, 100, 200])]
     out = llm2code2wav_token_only(src)
     assert len(out) == 1
     assert len(out[0]["prompt_token_ids"]) == 3
@@ -401,13 +518,16 @@ def test_covo_audio_llm2code2wav_full_payload_smoke() -> None:
     """Smoke: covo_audio producer-side payload builder returns audio_codes + finished."""
     from types import SimpleNamespace
 
-    from vllm_omni.model_executor.models.covo_audio.config_covo_audio import COVO_AUDIO_TOKEN_INDEX
     from vllm_omni.model_executor.stage_input_processors.covo_audio import (
         llm2code2wav_full_payload,
     )
 
     req = SimpleNamespace(
-        output_token_ids=[COVO_AUDIO_TOKEN_INDEX + 5, COVO_AUDIO_TOKEN_INDEX + 6, 99],
+        output_token_ids=[170005, 170006, 99],
+        sampling_params=_sampling_params_with_runtime(
+            "covo_audio",
+            {"audio_token_index": 170000, "eos_token_id": 160000, "vocab_size": 200000},
+        ),
     )
     payload = llm2code2wav_full_payload(None, {}, req)
     assert payload is not None
@@ -554,6 +674,7 @@ def test_mimo_audio_llm2code2wav_token_only_smoke() -> None:
     class _Out:
         def __init__(self, mm):
             self.multimodal_output = mm
+            self.sampling_params = _sampling_params_with_runtime("mimo_audio", _mimo_runtime())
 
     class _Wrap:
         def __init__(self, mm):
@@ -576,7 +697,6 @@ def test_mimo_audio_llm2code2wav_full_payload_smoke() -> None:
     import torch
 
     from vllm_omni.model_executor.stage_input_processors.mimo_audio import (
-        TALKER_CODEC_PAD_TOKEN_ID,
         llm2code2wav_full_payload,
     )
 
@@ -584,7 +704,10 @@ def test_mimo_audio_llm2code2wav_full_payload_smoke() -> None:
     audio = torch.arange(2 * 1 * 8 * 4, dtype=torch.long).reshape(2, 1, 8, 4)
     audio = audio.clamp(min=1)  # avoid zero-row drop
     pooling_output = {"codes.audio": audio}
-    req = SimpleNamespace(output_token_ids=[])
+    req = SimpleNamespace(
+        output_token_ids=[],
+        sampling_params=_sampling_params_with_runtime("mimo_audio", _mimo_runtime()),
+    )
     payload = llm2code2wav_full_payload(None, pooling_output, req)
     assert payload is not None
     assert "codes" in payload and "audio" in payload["codes"]
@@ -594,8 +717,8 @@ def test_mimo_audio_llm2code2wav_full_payload_smoke() -> None:
     # prepend_and_flatten_colmajor: PAD appears at column start in col-major flatten.
     # For shape [B=2, 1, 9, 4], each column has 1 PAD then 8 codec vals → PAD at indices 0, 9, 18, 27.
     out = payload["codes"]["audio"]
-    assert out[0] == TALKER_CODEC_PAD_TOKEN_ID
-    assert out[9] == TALKER_CODEC_PAD_TOKEN_ID
+    assert out[0] == 170100
+    assert out[9] == 170100
     assert payload["meta"]["finished"].item() is True
 
 
@@ -612,7 +735,10 @@ def test_mimo_audio_full_payload_nested_fallback() -> None:
     audio = torch.arange(1 * 1 * 8 * 4, dtype=torch.long).reshape(1, 1, 8, 4)
     audio = audio.clamp(min=1)
     pooling_output = {"codes": {"audio": audio}}  # nested, not flat
-    req = SimpleNamespace(output_token_ids=[])
+    req = SimpleNamespace(
+        output_token_ids=[],
+        sampling_params=_sampling_params_with_runtime("mimo_audio", _mimo_runtime()),
+    )
     payload = llm2code2wav_full_payload(None, pooling_output, req)
     assert payload is not None
     assert len(payload["codes"]["audio"]) == audio.numel() + int(audio.shape[0]) * 4

@@ -19,6 +19,7 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import CodesStruct, MetaStruct, OmniPayloadStruct
 from vllm_omni.inputs.data import OmniTokensPrompt
 from vllm_omni.model_executor.stage_input_processors.bagel import ExpandedPrompt
@@ -27,17 +28,7 @@ logger = init_logger(__name__)
 
 CFG_UNCOND_SUFFIX = "__cfg_uncond"
 
-# Vocab layout of nvidia/Nemotron-Labs-Audex-2B checkpoint_folder_audiogen:
-# <speechcodec_0> .. <speechcodec_65535> occupy a contiguous id block. The
-# deploy yaml can override both values; a unit test pins these defaults
-# against the real tokenizer.
-_DEFAULT_CODEC_TOKEN_OFFSET = 131077
-_DEFAULT_CODEC_VOCAB_SIZE = 65536
-
-# TTA <audiocodec_N> block (see models/audex/tta.py; pinned against the real
-# tokenizer there). Interleaved 4-codebook RVQ.
-_DEFAULT_AUDIOCODEC_TOKEN_OFFSET = 196613
-_DEFAULT_AUDIOCODEC_VOCAB_SIZE = 8192
+# TTA payloads are interleaved across four protocol codebooks.
 _TTA_NUM_CODEBOOKS = 4
 
 _STATE_KEY = "_audex_async_state"
@@ -78,13 +69,15 @@ def _finished_request_codes(
     request: Any,
     offset_key: str,
     size_key: str,
-    default_offset: int,
-    default_size: int,
 ) -> tuple[list[int], Any]:
     """Codec frame ids from a finished request's full token stream, plus its id."""
     cfg = _connector_extra(transfer_manager)
-    codec_offset = int(cfg.get(offset_key, default_offset))
-    codec_size = int(cfg.get(size_key, default_size))
+    codec_offset = get_required_config_field(
+        cfg, offset_key, expected_type=int, model="audex"
+    )
+    codec_size = get_required_config_field(
+        cfg, size_key, expected_type=int, model="audex"
+    )
     output_token_ids = _ensure_list(getattr(request, "output_token_ids", []))
     codes = _codec_frames(output_token_ids, codec_offset, codec_size)
     request_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", None)
@@ -177,10 +170,18 @@ def thinker2code2wav_async_chunk(
     finished = bool(is_finished or request.is_finished())
 
     cfg = _connector_extra(transfer_manager)
-    chunk_frames = int(cfg.get("codec_chunk_frames", 25))
-    initial_chunk_frames = int(cfg.get("initial_codec_chunk_frames", chunk_frames))
-    codec_offset = int(cfg.get("codec_token_offset", _DEFAULT_CODEC_TOKEN_OFFSET))
-    codec_size = int(cfg.get("codec_vocab_size", _DEFAULT_CODEC_VOCAB_SIZE))
+    chunk_frames = get_required_config_field(
+        cfg, "codec_chunk_frames", expected_type=int, model="audex"
+    )
+    initial_chunk_frames = get_required_config_field(
+        cfg, "initial_codec_chunk_frames", expected_type=int, model="audex"
+    )
+    codec_offset = get_required_config_field(
+        cfg, "codec_token_offset", expected_type=int, model="audex"
+    )
+    codec_size = get_required_config_field(
+        cfg, "codec_vocab_size", expected_type=int, model="audex"
+    )
     if chunk_frames <= 0 or initial_chunk_frames <= 0:
         raise ValueError(
             f"Invalid codec chunk config: codec_chunk_frames={chunk_frames}, "
@@ -259,8 +260,6 @@ def thinker2code2wav_full_payload(
         request,
         "codec_token_offset",
         "codec_vocab_size",
-        _DEFAULT_CODEC_TOKEN_OFFSET,
-        _DEFAULT_CODEC_VOCAB_SIZE,
     )
     if not codes:
         # Do NOT raise: the sync payload hook swallows exceptions and returns
@@ -291,8 +290,6 @@ def thinker2xcodec_full_payload(
         request,
         "audiocodec_token_offset",
         "audiocodec_vocab_size",
-        _DEFAULT_AUDIOCODEC_TOKEN_OFFSET,
-        _DEFAULT_AUDIOCODEC_VOCAB_SIZE,
     )
     # Error paths do NOT raise: the sync payload hook swallows exceptions and
     # returns None, so no terminal payload would reach stage 1 and the

@@ -261,8 +261,8 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
         hi = min(self._semantic_end_id + 1, vocab)
         if hi > lo:
             semantic_mask[lo:hi] = True
-        # Also allow <|im_end|> (token 151645 in Qwen3 tokeniser).
-        im_end_id = 151645
+        # Also allow the checkpoint's <|im_end|> token.
+        im_end_id = int(self.config.im_end_token_id)
         if im_end_id < vocab:
             semantic_mask[im_end_id] = True
         self.register_buffer("_semantic_allowed_mask", semantic_mask, persistent=False)
@@ -288,7 +288,7 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
             head_dim = attn.head_dim
             max_position = self.text_config.max_position_embeddings
             rope_params = getattr(self.text_config, "rope_scaling", None) or {}
-            rope_params.setdefault("rope_theta", getattr(self.text_config, "rope_theta", 1000000.0))
+            rope_params.setdefault("rope_theta", self.text_config.rope_theta)
             attn.rotary_emb = get_rope(
                 head_size=head_dim,
                 max_position=max_position,

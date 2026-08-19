@@ -37,6 +37,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import EmbeddingsStruct, OmniPayloadStruct, to_dict, to_struct
 from vllm_omni.model_executor.models.cosyvoice3.tokenizer import get_qwen_tokenizer
 from vllm_omni.model_executor.models.cosyvoice3.utils import (
@@ -679,10 +680,18 @@ class CosyVoice3Model(
             logits = processor.apply(logits)
 
         sampling_cfg = dict(self.config.llm.get("sampling", {}))
-        default_top_p = float(sampling_cfg.get("top_p", 0.8))
-        default_top_k = int(sampling_cfg.get("top_k", 25))
-        win_size = int(sampling_cfg.get("win_size", 10))
-        tau_r = float(sampling_cfg.get("tau_r", 0.1))
+        default_top_p = get_required_config_field(
+            sampling_cfg, "top_p", expected_type=float, model="cosyvoice3"
+        )
+        default_top_k = get_required_config_field(
+            sampling_cfg, "top_k", expected_type=int, model="cosyvoice3"
+        )
+        win_size = get_required_config_field(
+            sampling_cfg, "win_size", expected_type=int, model="cosyvoice3"
+        )
+        tau_r = get_required_config_field(
+            sampling_cfg, "tau_r", expected_type=float, model="cosyvoice3"
+        )
 
         sampled_ids: list[int] = []
         for req_idx in range(int(logits.shape[0])):

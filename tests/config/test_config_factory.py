@@ -6,8 +6,9 @@ Unit tests for StageConfigFactory and related classes.
 
 import importlib
 import warnings
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -32,11 +33,16 @@ from vllm_omni.config.stage_config import (
     _deep_merge_stage,
     _resolve_scheduler,
     build_stage_runtime_overrides,
+    get_required_config_field,
     load_deploy_config,
     merge_pipeline_deploy,
     pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
 )
 from vllm_omni.engine.arg_utils import SHARED_FIELDS, internal_blacklist_keys
+from vllm_omni.model_executor.models.qwen3_omni.runtime_config import (
+    resolve_qwen3_omni_runtime_config,
+)
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -59,8 +65,100 @@ def clear_config_factory_caches():
     _materialize_object_storage_configs.cache_clear()
 
 
-Q3_OMNI_ALL_STAGES_HF_CONFIG = Qwen3OmniMoeConfig(enable_audio_output=True)
+def _qwen3_omni_config(*, enable_audio_output: bool) -> Qwen3OmniMoeConfig:
+    config = Qwen3OmniMoeConfig(enable_audio_output=enable_audio_output)
+    if enable_audio_output:
+        # Mirror the published checkpoint rather than Transformers class
+        # defaults, whose codec EOS belongs to a different vocabulary.
+        config.talker_config.codec_eos_token_id = 2150
+        config.talker_config.speaker_id = {"custom": 2301}
+        config.thinker_config.audio_token_id = 151675
+        config.thinker_config.image_token_id = 151655
+        config.thinker_config.video_token_id = 151656
+    return config
+
+
+Q3_OMNI_ALL_STAGES_HF_CONFIG = _qwen3_omni_config(enable_audio_output=True)
 Q3_OMNI_THINKER_HF_CONFIG = Qwen3OmniMoeConfig(enable_audio_output=False)
+
+
+class TestConfigBoundPipelineUpdates:
+    @pytest.mark.parametrize(
+        ("config", "actual"),
+        [
+            (SimpleNamespace(talker_config=SimpleNamespace(codec_eos_token_id=None)), "None"),
+            (SimpleNamespace(talker_config=SimpleNamespace(codec_eos_token_id="bad")), "'bad'"),
+            (SimpleNamespace(talker_config=SimpleNamespace(codec_eos_token_id=True)), "True"),
+            (SimpleNamespace(talker_config=SimpleNamespace()), "<missing>"),
+        ],
+    )
+    def test_required_nested_field_rejects_invalid_values(self, config, actual):
+        with pytest.raises(ValueError) as exc_info:
+            get_required_config_field(
+                config,
+                "talker_config.codec_eos_token_id",
+                expected_type=int,
+                model="example_model",
+            )
+
+        message = str(exc_info.value)
+        assert "example_model" in message
+        assert "talker_config.codec_eos_token_id" in message
+        assert actual in message
+
+    def test_required_nested_field_supports_mapping_and_attribute_nodes(self):
+        config = SimpleNamespace(talker_config={"codec_eos_token_id": 4198})
+
+        value = get_required_config_field(
+            config,
+            "talker_config.codec_eos_token_id",
+            expected_type=int,
+            model="example_model",
+        )
+
+        assert value == 4198
+
+    def test_sampling_constraint_replacement_is_immutable_and_preserves_siblings(self):
+        original_stage = StagePipelineConfig(
+            stage_id=1,
+            model_stage="talker",
+            sampling_constraints={"detokenize": False, "temperature": 0.7},
+        )
+        untouched_stage = StagePipelineConfig(stage_id=2, model_stage="code2wav")
+        pipeline = PipelineConfig(
+            model_type="example_model",
+            stages=(original_stage, untouched_stage),
+        )
+
+        updated = replace_stage_sampling_constraints(
+            pipeline,
+            stage_id=1,
+            updates={"stop_token_ids": [4198]},
+        )
+
+        assert updated is not pipeline
+        assert updated.stages[1] is untouched_stage
+        assert original_stage.sampling_constraints == {"detokenize": False, "temperature": 0.7}
+        assert updated.stages[0].sampling_constraints == {
+            "detokenize": False,
+            "temperature": 0.7,
+            "stop_token_ids": [4198],
+        }
+        with pytest.raises(FrozenInstanceError):
+            updated.stages[0].model_stage = "changed"
+
+    def test_sampling_constraint_replacement_rejects_unknown_stage(self):
+        pipeline = PipelineConfig(
+            model_type="example_model",
+            stages=(StagePipelineConfig(stage_id=0, model_stage="talker"),),
+        )
+
+        with pytest.raises(ValueError, match=r"example_model.*stage 1"):
+            replace_stage_sampling_constraints(
+                pipeline,
+                stage_id=1,
+                updates={"stop_token_ids": [4198]},
+            )
 
 
 class TestStageType:
@@ -845,7 +943,7 @@ class TestPipelineRegistration:
             )
 
         assert isinstance(omni_config, VllmOmniConfig)
-        assert omni_config.pipeline_config is OMNI_PIPELINES["qwen3_tts"]
+        assert omni_config.pipeline_config is resolve_pipeline_config("qwen3_tts")
         assert len(omni_config.stage_configs) == 2
 
     def test_create_from_model_preserves_model_on_structured_diffusion_stage(self):
@@ -1291,7 +1389,9 @@ stages:
 
         with patch("vllm_omni.platforms.current_omni_platform") as platform:
             platform.device_name = "cuda"
-            stages = merge_pipeline_deploy(OMNI_PIPELINES[pipeline_name], deploy)
+            pipeline = resolve_pipeline_config(pipeline_name)
+            assert pipeline is not None
+            stages = merge_pipeline_deploy(pipeline, deploy)
         assert len(stages) == stage_count
         assert stages[-1].final_output is True
         assert stages[-1].final_output_type == final_output_type
@@ -1361,7 +1461,9 @@ stages:
         assert stage.async_scheduling is False
         assert stage.engine_extras["hf_overrides"]["architectures"] == ["StepAudio2ThinkerForConditionalGeneration"]
 
-        stages = merge_pipeline_deploy(OMNI_PIPELINES[deploy.pipeline], deploy)
+        pipeline = resolve_pipeline_config(deploy.pipeline)
+        assert pipeline is not None
+        stages = merge_pipeline_deploy(pipeline, deploy)
         assert len(stages) == 1
         assert stages[0].final_output is True
         assert stages[0].final_output_type == "text"
@@ -1696,6 +1798,54 @@ stages:
 
 
 class TestQwen3OmniPipeline:
+    def test_custom_checkpoint_contract_drives_talker_sampling(self):
+        hf_config = _qwen3_omni_config(enable_audio_output=True)
+        hf_config.talker_config.codec_eos_token_id = 2500
+        hf_config.talker_config.text_config.vocab_size = 3000
+        hf_config.talker_config.code_predictor_config.vocab_size = 1024
+        hf_config.code2wav_config.codebook_size = 1024
+
+        pipeline = resolve_pipeline_config("qwen3_omni_moe", hf_config)
+
+        assert pipeline is not None
+        constraints = pipeline.get_stage(1).sampling_constraints
+        assert constraints["stop_token_ids"] == [2500]
+        assert set(constraints["extra_args"]) == {"model_runtime"}
+        assert constraints["extra_args"]["model_runtime"]["qwen3_omni"]["codebook_size"] == 1024
+
+    def test_runtime_contract_rejects_missing_required_field(self):
+        hf_config = _qwen3_omni_config(enable_audio_output=True)
+        hf_config.talker_config.accept_hidden_layer = None
+
+        with pytest.raises(ValueError, match="talker_config.accept_hidden_layer"):
+            resolve_qwen3_omni_runtime_config(hf_config)
+
+    def test_runtime_contract_rejects_sampled_stop_inside_codebook(self):
+        hf_config = _qwen3_omni_config(enable_audio_output=True)
+        hf_config.talker_config.codec_eos_token_id = 1000
+        hf_config.talker_config.code_predictor_config.vocab_size = 2048
+        hf_config.code2wav_config.codebook_size = 2048
+
+        with pytest.raises(ValueError, match="sampled stop.*codebook"):
+            resolve_qwen3_omni_runtime_config(hf_config)
+
+    def test_runtime_contract_rejects_conflicting_codebook_sizes(self):
+        hf_config = _qwen3_omni_config(enable_audio_output=True)
+        hf_config.talker_config.code_predictor_config.vocab_size = 1024
+        hf_config.code2wav_config.codebook_size = 2048
+
+        with pytest.raises(ValueError, match="conflicting acoustic codebook sizes"):
+            resolve_qwen3_omni_runtime_config(hf_config)
+
+    def test_thinker_only_does_not_require_talker_runtime_contract(self):
+        hf_config = Qwen3OmniMoeConfig(enable_audio_output=False)
+        hf_config.talker_config.accept_hidden_layer = None
+
+        pipeline = resolve_pipeline_config("qwen3_omni_moe", hf_config)
+
+        assert pipeline is not None
+        assert pipeline.model_type == "qwen3_omni_moe_thinker_only"
+
     def test_registered(self):
         p = resolve_pipeline_config(
             "qwen3_omni_moe",
@@ -1844,7 +1994,8 @@ class TestQwen3TTSPipeline:
             pytest.skip("qwen3_tts deploy yaml not found")
 
         deploy = load_deploy_config(deploy_path)
-        pipeline = OMNI_PIPELINES["qwen3_tts"]
+        pipeline = resolve_pipeline_config("qwen3_tts")
+        assert pipeline is not None
         stages = merge_pipeline_deploy(pipeline, deploy)
 
         # Stage 0 inherits pipeline-level model_arch
@@ -1991,7 +2142,8 @@ class TestMingFlashOmniPipeline:
         assert len(deploy.stages) == 1
         assert deploy.pipeline == "ming_flash_omni_tts"
 
-        pipeline = OMNI_PIPELINES["ming_flash_omni_tts"]
+        pipeline = resolve_pipeline_config("ming_flash_omni_tts")
+        assert pipeline is not None
         stages = merge_pipeline_deploy(pipeline, deploy)
         assert len(stages) == 1
         assert stages[0].yaml_engine_args["model_arch"] == "MingFlashOmniTalkerForConditionalGeneration"

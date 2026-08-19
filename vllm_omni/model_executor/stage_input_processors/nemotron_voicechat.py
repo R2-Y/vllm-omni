@@ -22,6 +22,7 @@ from typing import Any
 
 import torch
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     IdsStruct,
@@ -36,11 +37,6 @@ from vllm_omni.data_entry_keys import (
 _FULL_PAYLOAD_REPLACE_KEYS: frozenset[str] = frozenset({"codes", "codes.audio", "meta", "meta.nvc_logical_prompt_len"})
 
 # <SPECIAL_12> in the Nemotron-Nano-9B-v2 vocab; the checkpoint config's
-# stt pad_token. The thinker also reports it in its latent metadata, which
-# takes precedence when present.
-_DEFAULT_TEXT_PAD_ID = 12
-
-
 def _info_get(info: Any, key: str) -> Any:
     if isinstance(info, dict):
         if key in info:
@@ -75,11 +71,11 @@ def thinker2talker_token_only(
         generated = list(getattr(output, "cumulative_token_ids", None) or getattr(output, "token_ids", None) or [])
         prompt_ids = list(getattr(thinker_output, "prompt_token_ids", None) or [])
         logical_prompt_len = max(len(prompt_ids) - 1, 0)
-        pad_id = _DEFAULT_TEXT_PAD_ID
         info = getattr(thinker_output, "additional_information", None)
         reported_pad = _info_get(info, "nvc_text_pad_id")
-        if reported_pad is not None:
-            pad_id = int(reported_pad)
+        if isinstance(reported_pad, bool) or not isinstance(reported_pad, int):
+            raise ValueError("Nemotron VoiceChat thinker output is missing integer nvc_text_pad_id")
+        pad_id = reported_pad
         timeline = [pad_id] * logical_prompt_len + [int(t) for t in generated]
         inputs.append(
             OmniTokensPrompt(
@@ -124,10 +120,10 @@ def thinker2talker_async_chunk(
     # vLLM prompt = logical prompt + 1 placeholder (acoustic frame 0).
     logical_prompt_len = max(len(prompt_ids) - 1, 0)
     generated = list(getattr(request, "output_token_ids", None) or [])
-    pad_id = _DEFAULT_TEXT_PAD_ID
     reported_pad = _info_get(getattr(request, "additional_information", None), "nvc_text_pad_id")
-    if reported_pad is not None:
-        pad_id = int(reported_pad)
+    if isinstance(reported_pad, bool) or not isinstance(reported_pad, int):
+        raise ValueError("Nemotron VoiceChat request is missing integer nvc_text_pad_id")
+    pad_id = reported_pad
     timeline = [pad_id] * logical_prompt_len + [int(t) for t in generated]
 
     # Skip no-progress wakeups (same length as the last emitted chunk).
@@ -213,7 +209,12 @@ def talker2code2wav_async_chunk(
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_frames = int(cfg.get("codec_chunk_frames", 13))
+    chunk_frames = get_required_config_field(
+        cfg,
+        "codec_chunk_frames",
+        expected_type=int,
+        model="nemotron_voicechat",
+    )
     if new_frames < chunk_frames and not is_finished:
         return None
     if new_frames <= 0 and is_finished and frames_sent > 0:

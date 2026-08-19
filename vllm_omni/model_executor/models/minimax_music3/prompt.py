@@ -24,17 +24,35 @@ from typing import Any
 
 # Pinned by ``validate_tokenizer_ids``: a checkpoint whose tokenizer disagrees
 # is not this model, and silently producing noise is worse than failing.
-SPECIAL_TOKEN_IDS: dict[str, int] = {
-    "<|im_start|>": 151644,
-    "<|im_end|>": 151645,
-    "<|audio_cfg|>": 151654,
-    "<|audio_start|>": 151669,
-    "<|audio_end|>": 151670,
-    "<|caption_start|>": 151671,
-    "<|caption_end|>": 151672,
-    "<|lyrics_start|>": 151673,
-    "<|lyrics_end|>": 151674,
-}
+SPECIAL_TOKENS = (
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|audio_cfg|>",
+    "<|audio_start|>",
+    "<|audio_end|>",
+    "<|caption_start|>",
+    "<|caption_end|>",
+    "<|lyrics_start|>",
+    "<|lyrics_end|>",
+)
+
+
+def _checkpoint_prompt_protocol_ids() -> dict[str, int]:
+    """IDs consumed by the AR/pipeline protocol; request prompts resolve tokenizer metadata separately."""
+    return {
+        "<|im_start|>": 151644,
+        "<|im_end|>": 151645,
+        "<|audio_cfg|>": 151654,
+        "<|audio_start|>": 151669,
+        "<|audio_end|>": 151670,
+        "<|caption_start|>": 151671,
+        "<|caption_end|>": 151672,
+        "<|lyrics_start|>": 151673,
+        "<|lyrics_end|>": 151674,
+    }
+
+
+SPECIAL_TOKEN_IDS = _checkpoint_prompt_protocol_ids()
 
 # c0 codes occupy the backbone vocabulary immediately above the text tokens.
 AUDIO_CODE_OFFSET = 151675
@@ -123,7 +141,7 @@ def build_prompt(caption: str, lyrics: str) -> str:
     )
 
 
-def build_cfg_null_token_ids(prompt_token_ids: list[int]) -> list[int]:
+def build_cfg_null_token_ids(prompt_token_ids: list[int], special_token_ids: dict[str, int]) -> list[int]:
     """Return the unconditioned twin's token ids for a conditioned prompt.
 
     Everything between the leading ``<|im_start|>`` and the trailing
@@ -138,9 +156,9 @@ def build_cfg_null_token_ids(prompt_token_ids: list[int]) -> list[int]:
     if len(prompt_token_ids) < 4:
         raise ValueError(f"MiniMax Music 3 prompt is too short to build a CFG twin: {len(prompt_token_ids)} tokens")
     expected = (
-        SPECIAL_TOKEN_IDS["<|im_start|>"],
-        SPECIAL_TOKEN_IDS["<|im_end|>"],
-        SPECIAL_TOKEN_IDS["<|audio_start|>"],
+        special_token_ids["<|im_start|>"],
+        special_token_ids["<|im_end|>"],
+        special_token_ids["<|audio_start|>"],
     )
     actual = (prompt_token_ids[0], prompt_token_ids[-2], prompt_token_ids[-1])
     if actual != expected:
@@ -149,24 +167,36 @@ def build_cfg_null_token_ids(prompt_token_ids: list[int]) -> list[int]:
             f"(im_start, im_end, audio_start)={expected}, got {actual}"
         )
     null_ids = list(prompt_token_ids)
-    null_ids[1:-2] = [SPECIAL_TOKEN_IDS["<|audio_cfg|>"]] * (len(null_ids) - 3)
+    null_ids[1:-2] = [special_token_ids["<|audio_cfg|>"]] * (len(null_ids) - 3)
     return null_ids
 
 
+def resolve_special_token_ids(tokenizer: Any) -> dict[str, int]:
+    """Resolve and validate the prompt ABI from the checkpoint tokenizer."""
+    resolved = {token: tokenizer.convert_tokens_to_ids(token) for token in SPECIAL_TOKENS}
+    invalid = {
+        token: value
+        for token, value in resolved.items()
+        if isinstance(value, bool) or not isinstance(value, int)
+    }
+    if invalid or len(set(resolved.values())) != len(resolved):
+        raise ValueError(f"MiniMax Music 3 tokenizer has invalid special-token metadata: {resolved}")
+    return resolved
+
+
 def validate_tokenizer_ids(tokenizer: Any) -> None:
-    """Fail fast when a tokenizer is not the supported music tokenizer."""
-    for token, expected in SPECIAL_TOKEN_IDS.items():
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        if token_id != expected:
-            raise ValueError(f"MiniMax Music 3 tokenizer mismatch for {token}: expected {expected}, got {token_id}")
+    """Backward-compatible validation entry point."""
+    resolve_special_token_ids(tokenizer)
 
 
 __all__ = [
     "AUDIO_CODE_OFFSET",
+    "SPECIAL_TOKENS",
     "SPECIAL_TOKEN_IDS",
     "build_cfg_null_token_ids",
     "build_prompt",
     "clean_caption",
     "normalize_lyrics",
+    "resolve_special_token_ids",
     "validate_tokenizer_ids",
 ]

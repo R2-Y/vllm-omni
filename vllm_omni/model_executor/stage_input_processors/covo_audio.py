@@ -1,11 +1,16 @@
 # Copyright 2026 Tencent.
+from collections.abc import Mapping
 from typing import Any
 
 import torch
 from vllm.logger import init_logger
 
 from vllm_omni.inputs.data import OmniTokensPrompt
-from vllm_omni.model_executor.models.covo_audio.config_covo_audio import COVO_AUDIO_TOKEN_INDEX
+from vllm_omni.model_executor.models.covo_audio.runtime_config import (
+    covo_audio_runtime_from_meta,
+    covo_audio_runtime_from_sampling_params,
+    get_required_covo_audio_runtime_int,
+)
 
 logger = init_logger(__name__)
 
@@ -15,9 +20,9 @@ logger = init_logger(__name__)
 _FULL_PAYLOAD_REPLACE_KEYS: frozenset[str] = frozenset()
 
 
-def _filter_audio_codes(token_ids: list[int]) -> list[int]:
-    """Filter codec-range token ids and rebase by COVO_AUDIO_TOKEN_INDEX."""
-    audio_codes = [t - COVO_AUDIO_TOKEN_INDEX for t in token_ids if t >= COVO_AUDIO_TOKEN_INDEX]
+def _filter_audio_codes(token_ids: list[int], *, audio_token_index: int) -> list[int]:
+    """Filter codec-range token ids and rebase by checkpoint runtime."""
+    audio_codes = [token_id - audio_token_index for token_id in token_ids if token_id >= audio_token_index]
     if not audio_codes:
         audio_codes = [-1]
     return audio_codes
@@ -27,6 +32,10 @@ def llm2code2wav_token_only(
     source_outputs: list[Any],
     prompt: Any = None,
     requires_multimodal_data: bool = False,
+    *,
+    sampling_params: Any | None = None,
+    source_sampling_params: Any | None = None,
+    target_sampling_params: Any | None = None,
 ) -> list[OmniTokensPrompt]:
     """Sync-side placeholder for the non-async-chunk Stage-1 input.
 
@@ -38,7 +47,28 @@ def llm2code2wav_token_only(
     code2wav_inputs: list[OmniTokensPrompt] = []
     for output_wrapper in source_outputs:
         output = output_wrapper.outputs[0]
-        audio_codes = _filter_audio_codes(list(output.token_ids))
+        mm = getattr(output, "multimodal_output", None)
+        mm_meta = mm.get("meta") if isinstance(mm, Mapping) else None
+        runtime_params = (
+            source_sampling_params
+            if source_sampling_params is not None
+            else target_sampling_params
+            if target_sampling_params is not None
+            else sampling_params
+        )
+        if runtime_params is not None:
+            runtime = covo_audio_runtime_from_sampling_params(runtime_params)
+        elif isinstance(mm_meta, Mapping) and "model_runtime" in mm_meta:
+            runtime = covo_audio_runtime_from_meta(mm_meta)
+        else:
+            sampling_params = getattr(output_wrapper, "sampling_params", None) or getattr(
+                output,
+                "sampling_params",
+                None,
+            )
+            runtime = covo_audio_runtime_from_sampling_params(sampling_params)
+        audio_token_index = get_required_covo_audio_runtime_int(runtime, "audio_token_index")
+        audio_codes = _filter_audio_codes(list(output.token_ids), audio_token_index=audio_token_index)
         code2wav_inputs.append(
             OmniTokensPrompt(
                 prompt_token_ids=[0] * len(audio_codes),
@@ -69,8 +99,17 @@ def llm2code2wav_full_payload(
             getattr(request, "request_id", "?"),
         )
         return None
-    audio_codes = _filter_audio_codes(output_token_ids)
+    flat_runtime = pooling_output.get("meta.model_runtime") if isinstance(pooling_output, Mapping) else None
+    if isinstance(flat_runtime, Mapping):
+        runtime = covo_audio_runtime_from_meta({"model_runtime": flat_runtime})
+    else:
+        runtime = covo_audio_runtime_from_sampling_params(getattr(request, "sampling_params", None))
+    audio_token_index = get_required_covo_audio_runtime_int(runtime, "audio_token_index")
+    audio_codes = _filter_audio_codes(output_token_ids, audio_token_index=audio_token_index)
     return {
         "codes": {"audio": audio_codes},
-        "meta": {"finished": torch.tensor(True, dtype=torch.bool)},
+        "meta": {
+            "finished": torch.tensor(True, dtype=torch.bool),
+            "model_runtime": {"covo_audio": dict(runtime)},
+        },
     }

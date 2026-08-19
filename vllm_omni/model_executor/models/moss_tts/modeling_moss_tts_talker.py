@@ -20,6 +20,7 @@ from vllm.model_executor.models.qwen3 import Qwen3Model
 from vllm.sequence import IntermediateTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.moss_tts.configuration_moss_tts import (
     MossTTSDelayConfig,
     MossTTSLocalConfig,
@@ -137,8 +138,12 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         self.audio_end_token_id: int = self.config.audio_end_token_id
         self.audio_assistant_gen_slot_token_id: int = self.config.audio_assistant_gen_slot_token_id
         self.audio_assistant_delay_slot_token_id: int = self.config.audio_assistant_delay_slot_token_id
-        self.pad_token_id: int = getattr(self.config, "pad_token_id", 151643)
-        self.im_end_token_id: int = getattr(self.config, "im_end_token_id", 151645)
+        self.pad_token_id = get_required_config_field(
+            self.config, "pad_token_id", expected_type=int, model="moss_tts_delay"
+        )
+        self.im_end_token_id = get_required_config_field(
+            self.config, "im_end_token_id", expected_type=int, model="moss_tts_delay"
+        )
 
         # Qwen3 backbone — weights live under ``language_model.*``. vLLM's
         # Qwen3Model reads num_hidden_layers/hidden_size/etc. from
@@ -796,9 +801,6 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
     has_preprocess: bool = True
     has_postprocess: bool = True
 
-    AUDIO_BOS = 1025
-    AUDIO_EOS = 1026
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.vllm_config = vllm_config
@@ -810,8 +812,17 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         self.n_vq: int = int(self.config.rvq)
         self.audio_vocab_size: int = int(self.config.audio_vocab_size)
         self.audio_pad_token: int = int(self.config.audio_pad_token)
+        self.audio_bos_id = self.audio_pad_token + 1
+        self.audio_eos_stream_id = self.audio_pad_token + 2
+        if self.audio_eos_stream_id != self.audio_vocab_size - 1:
+            raise ValueError(
+                "MOSS-TTS-Realtime requires audio PAD/BOS/EOS to occupy the "
+                "last three audio vocabulary slots"
+            )
         self.text_pad_id: int = int(self.config.text_pad)
-        self.audio_eos_id: int = int(getattr(self.config, "eos_token_id", 151645))
+        self.audio_eos_id = get_required_config_field(
+            self.config, "eos_token_id", expected_type=int, model="moss_tts_realtime"
+        )
         self.text_vocab_size: int = int(lang_cfg.vocab_size)
 
         # Qwen3 backbone (uses the inner language_config). vLLM exposes its
@@ -837,7 +848,12 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
             nn.Embedding(
                 self.text_vocab_size,
                 self.hidden_size,
-                padding_idx=int(getattr(lang_cfg, "pad_token_id", 151643) or 151643),
+                padding_idx=get_required_config_field(
+                    lang_cfg,
+                    "pad_token_id",
+                    expected_type=int,
+                    model="moss_tts_realtime.language_config",
+                ),
             )
         )
         for _ in range(self.n_vq):
@@ -1113,7 +1129,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
 
                 ch0 = int(new_codes[0].item())
                 # Stop condition mirrors upstream: codebook 0 == eos_audio_id.
-                if ch0 == self.AUDIO_EOS:
+                if ch0 == self.audio_eos_stream_id:
                     state["is_stopping"] = True
                     state["step"] = int(state.get("step", 0)) + 1
                     info["audio_codes"] = {
@@ -1122,7 +1138,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                     }
                     continue  # don't append the eos frame to accumulated
 
-                if ch0 in (self.AUDIO_BOS, self.audio_pad_token):
+                if ch0 in (self.audio_bos_id, self.audio_pad_token):
                     # Skip the bos / pad frames — they don't decode to real audio.
                     state["step"] = int(state.get("step", 0)) + 1
                     info["audio_codes"] = {

@@ -34,6 +34,8 @@ from transformers import WhisperConfig
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+from vllm_omni.config.stage_config import get_required_config_field
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -113,7 +115,12 @@ class WhisperVQEncoder(WhisperEncoder):
         max_source_positions = config.max_source_positions
 
         # Truncate layers when quantize_encoder_only is set.
-        qpos = int(getattr(config, "quantize_position", 0) or 0)
+        qpos = get_required_config_field(
+            config,
+            "quantize_position",
+            expected_type=int,
+            model="whisper_vq",
+        )
         if getattr(config, "quantize_encoder_only", False):
             self.layers = nn.ModuleList(list(self.layers[:qpos]))
             self.layer_norm = None
@@ -142,7 +149,12 @@ class WhisperVQEncoder(WhisperEncoder):
             self.embed_positions2 = nn.Embedding(pos2_len, embed_dim)
 
         # cached for forward()
-        self._pooling_position = int(getattr(config, "pooling_position", 0) or 0)
+        self._pooling_position = get_required_config_field(
+            config,
+            "pooling_position",
+            expected_type=int,
+            model="whisper_vq",
+        )
         self._quantize_position = qpos if vq_sz is not None else -1
 
     # ------------------------------------------------------------------

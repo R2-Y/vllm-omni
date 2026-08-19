@@ -11,6 +11,7 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
+from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     EmbeddingsStruct,
@@ -222,13 +223,19 @@ def ar_to_dit_async_chunk(
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_frames_cfg = cfg.get("codec_chunk_frames", 25)
+    if "codec_chunk_frames" not in cfg:
+        raise ValueError("Model 'glm_tts' requires config field 'codec_chunk_frames'")
+    chunk_frames_cfg = cfg["codec_chunk_frames"]
     if isinstance(chunk_frames_cfg, list):
         progressive_chunk_sizes = [int(c) for c in chunk_frames_cfg]
     else:
         progressive_chunk_sizes = [int(chunk_frames_cfg)]
-    left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
-    crossfade_sec = float(cfg.get("crossfade_sec", 0.1))
+    left_context_size_config = get_required_config_field(
+        cfg, "codec_left_context_frames", expected_type=int, model="glm_tts"
+    )
+    crossfade_sec = get_required_config_field(
+        cfg, "crossfade_sec", expected_type=float, model="glm_tts"
+    )
 
     if not progressive_chunk_sizes or any(c <= 0 for c in progressive_chunk_sizes) or left_context_size_config < 0:
         raise ValueError(

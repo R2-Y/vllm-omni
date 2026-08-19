@@ -14,9 +14,6 @@ from .constants import (
     LATENT_DIM,
     LLM_HIDDEN_SIZE,
     LLM_VOCAB_SIZE,
-    MOE_AUDIO_DUMMY_TOKEN_ID,
-    MOE_AUDIO_EOS_TOKEN_ID,
-    MOE_TEXT_EOS_TOKEN_ID,
     PATCH_SIZE,
     SAMPLE_RATE,
 )
@@ -73,24 +70,21 @@ def _nested_get(obj: Any, *keys: str, default: Any = None) -> Any:
 
 def validate_ming_tts_config(cfg: Any) -> None:
     """Run before GPU allocation/weight loading. Raises ValueError on mismatches."""
-    is_moe = getattr(cfg, "model_variant", "dense") == "moe"
-    exp_audio_dummy = MOE_AUDIO_DUMMY_TOKEN_ID if is_moe else 151705
-    exp_audio_eos = MOE_AUDIO_EOS_TOKEN_ID if is_moe else 151704
-    exp_text_eos = MOE_TEXT_EOS_TOKEN_ID if is_moe else 151669
-    if cfg.audio_dummy_token_id != exp_audio_dummy:
-        raise ValueError(
-            f"audio_dummy_token_id={cfg.audio_dummy_token_id}, expected {exp_audio_dummy} (<audioPatch>). "
-            "Wrong tokenizer/checkpoint?"
-        )
-    if cfg.audio_eos_token_id != exp_audio_eos:
-        raise ValueError(
-            f"audio_eos_token_id={cfg.audio_eos_token_id}, expected {exp_audio_eos} (<end_of_audio>). "
-            "Wrong tokenizer/checkpoint?"
-        )
-    if cfg.text_eos_token_id != exp_text_eos:
-        raise ValueError(
-            f"text_eos_token_id={cfg.text_eos_token_id}, expected {exp_text_eos}. Wrong tokenizer/checkpoint?"
-        )
+    is_moe = getattr(cfg, "model_variant", None) == "moe"
+    token_fields = (
+        "audio_dummy_token_id",
+        "audio_start_token_id",
+        "audio_end_token_id",
+        "audio_eos_token_id",
+        "text_eos_token_id",
+        "speaker_placeholder_token_id",
+    )
+    for field_name in token_fields:
+        value = getattr(cfg, field_name, None)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < cfg.llm_vocab_size:
+            raise ValueError(
+                f"{field_name}={value!r} must be an integer within llm_vocab_size={cfg.llm_vocab_size}"
+            )
 
     if cfg.audio_tokenizer_config is None:
         raise ValueError("audio_tokenizer_config is None. Nested AudioVAE config was not deserialized correctly.")
@@ -172,7 +166,10 @@ def validate_ming_tts_config(cfg: Any) -> None:
 
     if cfg.latent_chunk_size <= 0:
         raise ValueError(f"latent_chunk_size must be > 0, got {cfg.latent_chunk_size}.")
-    initial_latent_chunk_size = getattr(cfg, "initial_latent_chunk_size", 0)
+    try:
+        initial_latent_chunk_size = cfg.initial_latent_chunk_size
+    except AttributeError as exc:
+        raise ValueError("Ming TTS config requires initial_latent_chunk_size") from exc
     if initial_latent_chunk_size < 0:
         raise ValueError(f"initial_latent_chunk_size must be >= 0, got {initial_latent_chunk_size}.")
     if cfg.latent_left_context < 0:

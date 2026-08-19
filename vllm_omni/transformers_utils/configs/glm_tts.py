@@ -55,6 +55,8 @@ class GLMTTSConfig(PretrainedConfig):
         ras_top_k: int = 25,
         ras_win_size: int = 10,
         ras_tau_r: float = 0.1,
+        use_dit_cuda_graphs: bool = False,
+        max_prompt_speech_tokens: int = 1024,
         **kwargs: Any,
     ):
         self.vocab_size = vocab_size
@@ -84,8 +86,9 @@ class GLMTTSConfig(PretrainedConfig):
         self.ras_top_k = ras_top_k
         self.ras_win_size = ras_win_size
         self.ras_tau_r = ras_tau_r
+        self.use_dit_cuda_graphs = use_dit_cuda_graphs
+        self.max_prompt_speech_tokens = max_prompt_speech_tokens
         super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, **kwargs)
-
 
 AutoConfig.register("glm_tts", GLMTTSConfig)
 

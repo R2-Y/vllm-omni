@@ -18,7 +18,11 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
+    get_required_config_field,
+    pipeline_cfg_resolver,
+    replace_stage_sampling_constraints,
 )
+from vllm_omni.transformers_utils.configs.higgs_audio_v3 import HiggsAudioV3Config
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.higgs_audio_v3"
 
@@ -35,13 +39,8 @@ HIGGS_AUDIO_V3_PIPELINE = PipelineConfig(
             input_sources=(),
             owns_tokenizer=True,
             engine_output_type="latent",
-            # stop_token_ids: the model-owned sampler forces eos at ramp-down
-            # completion. Safety stops from the actual V3 checkpoint:
-            #   151643 = <|endoftext|> (eos_token_id from config.json)
-            #   151671 = <|audio_end|> (audio generation end marker)
             sampling_constraints={
                 "detokenize": False,
-                "stop_token_ids": [151643, 151671],
             },
             async_chunk_process_next_stage_input_func=f"{_PROC}.talker2code2wav_async_chunk",
         ),
@@ -59,3 +58,30 @@ HIGGS_AUDIO_V3_PIPELINE = PipelineConfig(
         ),
     ),
 )
+
+
+@pipeline_cfg_resolver(
+    config_type=HiggsAudioV3Config,
+    default_pipeline_config=HIGGS_AUDIO_V3_PIPELINE,
+)
+def resolve_higgs_audio_v3_pipeline(hf_config: HiggsAudioV3Config) -> PipelineConfig:
+    """Bind safety stops to tokenizer-resolved checkpoint config fields."""
+    if hf_config.eos_token_id is None or hf_config.audio_end_token_id is None:
+        model_path = get_required_config_field(
+            hf_config,
+            "_name_or_path",
+            expected_type=str,
+            model="higgs_audio_v3",
+        )
+        if not model_path:
+            raise ValueError("Model 'higgs_audio_v3' requires a checkpoint path to resolve tokenizer-owned stop IDs")
+        hf_config.resolve_special_tokens(model_path)
+    stop_token_ids = [
+        get_required_config_field(hf_config, field, expected_type=int, model="higgs_audio_v3")
+        for field in ("eos_token_id", "audio_end_token_id")
+    ]
+    return replace_stage_sampling_constraints(
+        HIGGS_AUDIO_V3_PIPELINE,
+        stage_id=0,
+        updates={"stop_token_ids": stop_token_ids},
+    )

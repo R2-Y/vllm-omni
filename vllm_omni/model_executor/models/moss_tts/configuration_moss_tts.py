@@ -265,6 +265,7 @@ class MossTTSLocalConfig(PretrainedConfig):
         sampling_rate: int = 48000,
         audio_tokenizer_name_or_path: str = "OpenMOSS-Team/MOSS-Audio-Tokenizer-v2",
         local_text_head_mode: str = "binary",
+        local_rope_base: float = 1_000_000.0,
         **kwargs: object,
     ) -> None:
         if qwen3_config is None:
@@ -277,11 +278,19 @@ class MossTTSLocalConfig(PretrainedConfig):
             self.qwen3_config = qwen3_config
 
         if isinstance(gpt2_config, dict):
+            resolved_local_rope_base = gpt2_config.get("rope_base", local_rope_base)
+        elif gpt2_config is not None and hasattr(gpt2_config, "rope_base"):
+            resolved_local_rope_base = gpt2_config.rope_base
+        else:
+            resolved_local_rope_base = local_rope_base
+        if isinstance(gpt2_config, dict):
             gpt2_config = dict(gpt2_config)
             gpt2_config.pop("model_type", None)
             self.gpt2_config = GPT2Config(**gpt2_config)
         else:
             self.gpt2_config = gpt2_config
+        if self.gpt2_config is not None:
+            self.gpt2_config.rope_base = resolved_local_rope_base
 
         super().__init__(pad_token_id=pad_token_id, **kwargs)
 
@@ -298,6 +307,7 @@ class MossTTSLocalConfig(PretrainedConfig):
         self.sampling_rate = sampling_rate
         self.audio_tokenizer_name_or_path = audio_tokenizer_name_or_path
         self.local_text_head_mode = local_text_head_mode
+        self.local_rope_base = resolved_local_rope_base
 
     def get_text_config(self, **_: object) -> Qwen3Config:
         return self.qwen3_config

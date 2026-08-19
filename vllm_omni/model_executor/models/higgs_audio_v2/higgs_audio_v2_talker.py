@@ -1343,7 +1343,7 @@ class HiggsAudioV2TalkerForConditionalGeneration(nn.Module):
         num_codebooks = int(self.config.num_codebooks)
         bos = int(self.config.audio_stream_bos_id)
         eos_stream = int(self.config.audio_stream_eos_id)
-        audio_eos_vocab = int(getattr(self.config, "audio_eos_token_id", -1))
+        audio_eos_vocab = int(self.config.audio_eos_token_id)
 
         # ``audio_row_indices`` and ``self._audio_state`` were initialised
         # earlier (right after ``is_audio`` was computed) so the RAS check
@@ -1608,7 +1608,7 @@ class HiggsAudioV2TalkerForConditionalGeneration(nn.Module):
             audio_state = getattr(self, "_audio_state", {}) or {}
             slot_state = audio_state.get(i)
             should_terminate = bool(isinstance(slot_state, dict) and slot_state.get("should_terminate"))
-            audio_eos_vocab = int(getattr(self.config, "audio_eos_token_id", -1))
+            audio_eos_vocab = int(self.config.audio_eos_token_id)
             if should_terminate and 0 <= audio_eos_vocab < int(logits.shape[-1]):
                 # Force audio_eos at this position; upstream override at
                 # ramp-down completion (modeling_higgs_audio.py:1564).
