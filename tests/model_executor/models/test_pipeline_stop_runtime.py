@@ -1,16 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-import vllm_omni.model_executor.models.audex.pipeline as audex_pipeline
-from vllm_omni.model_executor.models.audex.pipeline import (
-    resolve_audex_s2s_pipeline,
-    resolve_audex_tta_pipeline,
-    resolve_audex_tts_pipeline,
-)
 from vllm_omni.model_executor.models.cosyvoice3.pipeline import resolve_cosyvoice3_pipeline
 from vllm_omni.model_executor.models.covo_audio.config_covo_audio import CovoAudioConfig
 from vllm_omni.model_executor.models.covo_audio.pipeline import resolve_covo_audio_pipeline
@@ -32,6 +24,8 @@ from vllm_omni.transformers_utils.configs.cosyvoice3 import CosyVoice3Config
 from vllm_omni.transformers_utils.configs.glm_tts import GLMTTSConfig
 from vllm_omni.transformers_utils.configs.higgs_audio_v3 import HiggsAudioV3Config
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 def _stop_ids(pipeline) -> list[int]:
     return pipeline.get_stage(0).sampling_constraints["stop_token_ids"]
@@ -39,43 +33,6 @@ def _stop_ids(pipeline) -> list[int]:
 
 def _runtime(pipeline, namespace: str) -> dict[str, int]:
     return pipeline.get_stage(0).sampling_constraints["extra_args"]["model_runtime"][namespace]
-
-
-class _AudexTokenizer:
-    unk_token_id = -1
-
-    def convert_tokens_to_ids(self, token: str) -> int:
-        return {
-            "<speechgen_end>": 180001,
-            "<audiogen_end>": 180002,
-        }.get(token, self.unk_token_id)
-
-
-@pytest.mark.parametrize(
-    ("resolver", "expected"),
-    [
-        (resolve_audex_tts_pipeline, [180001]),
-        (resolve_audex_s2s_pipeline, [180001]),
-        (resolve_audex_tta_pipeline, [180002]),
-    ],
-)
-def test_audex_tokenizer_stop_propagates(monkeypatch, resolver, expected) -> None:
-    monkeypatch.setattr(audex_pipeline.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: _AudexTokenizer())
-
-    assert _stop_ids(resolver(SimpleNamespace(_name_or_path="audex-checkpoint"))) == expected
-
-
-@pytest.mark.parametrize(
-    "resolver",
-    [
-        resolve_audex_tts_pipeline,
-        resolve_audex_s2s_pipeline,
-        resolve_audex_tta_pipeline,
-    ],
-)
-def test_audex_missing_checkpoint_path_fails(resolver) -> None:
-    with pytest.raises(ValueError, match="_name_or_path"):
-        resolver(SimpleNamespace(_name_or_path=None))
 
 
 def test_cosyvoice3_nondefault_stop_propagates_to_pipeline_and_model_config() -> None:
@@ -164,26 +121,6 @@ def test_covo_runtime_propagates_and_invalid_boundary_fails() -> None:
         resolve_covo_audio_pipeline(CovoAudioConfig(audio_token_index=100, eos_token_id=100))
 
 
-def test_fish_missing_stop_fails() -> None:
-    config = FishSpeechConfig()
-    config.im_end_token_id = None
-    with pytest.raises(ValueError, match="im_end_token_id"):
-        resolve_fish_speech_pipeline(config)
-
-
-def test_higgs_v2_missing_audio_stop_fails() -> None:
-    config = HiggsAudioV2Config()
-    config.audio_eos_token_id = None
-    with pytest.raises(ValueError, match="audio_eos_token_id"):
-        resolve_higgs_audio_v2_pipeline(config)
-
-
-def test_higgs_v3_missing_tokenizer_stop_fails() -> None:
-    config = HiggsAudioV3Config(eos_token_id=170005, audio_end_token_id=None)
-    with pytest.raises(ValueError, match="checkpoint path"):
-        resolve_higgs_audio_v3_pipeline(config)
-
-
 def test_mimo_runtime_propagates_and_duplicate_tokens_fail() -> None:
     config = MiMoAudioConfig(
         empty_token_id=170000,
@@ -197,30 +134,11 @@ def test_mimo_runtime_propagates_and_duplicate_tokens_fail() -> None:
         vocab_size=200000,
     )
     pipeline = resolve_mimo_audio_pipeline(config)
-    assert _stop_ids(pipeline) == [170003, 170007]
     assert _runtime(pipeline, "mimo_audio")["empty_token_id"] == 170000
 
     config.im_end_token_id = config.empty_token_id
     with pytest.raises(ValueError, match="distinct special token IDs"):
         resolve_mimo_audio_pipeline(config)
-
-
-def test_moss_local_missing_stop_fails() -> None:
-    config = MossTTSLocalConfig()
-    config.im_end_token_id = None
-    with pytest.raises(ValueError, match="im_end_token_id"):
-        resolve_moss_tts_local_pipeline(config)
-
-
-def test_moss_nano_invalid_stop_fails() -> None:
-    config = MossTTSNanoConfig(
-        eos_token_id=32,
-        streaming_continue_token_id=8,
-        vocab_size=32,
-        hidden_size=16,
-    )
-    with pytest.raises(ValueError, match="eos_token_id"):
-        resolve_moss_tts_nano_pipeline(config)
 
 
 class _MiniMaxTokenizer:

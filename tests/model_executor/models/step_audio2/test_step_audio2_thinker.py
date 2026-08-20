@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for Step-Audio2 thinker processor, encoder, and token handling."""
 
+from dataclasses import asdict
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -162,3 +165,38 @@ def test_has_audio_output():
 
     with_audio = [100, 200, config.audio_start + 4, 300]
     assert StepAudio2ThinkerForConditionalGeneration.has_audio_output(with_audio, config)
+
+
+def test_runtime_config_round_trip_uses_checkpoint_values():
+    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
+        StepAudio2Config,
+    )
+
+    config = StepAudio2Config.from_hf_config(
+        SimpleNamespace(
+            step_audio2={
+                "input_sample_rate": 22050,
+                "output_sample_rate": 32000,
+                "audio_start": 120000,
+                "audio_patch_token_id": 119999,
+                "text_max": 119998,
+            }
+        )
+    )
+    runtime = StepAudio2Config.from_mapping(asdict(config))
+
+    assert runtime.input_sample_rate == 22050
+    assert runtime.output_sample_rate == 32000
+    assert runtime.audio_start == 120000
+
+
+def test_runtime_config_rejects_missing_field():
+    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
+        StepAudio2Config,
+    )
+
+    values = asdict(StepAudio2Config())
+    values.pop("output_sample_rate")
+
+    with pytest.raises(ValueError, match="output_sample_rate"):
+        StepAudio2Config.from_mapping(values)

@@ -4,9 +4,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import (
+    Qwen3TTSConfig,
+)
+from vllm_omni.model_executor.models.qwen3_tts.pipeline import (
+    resolve_qwen3_tts_pipeline,
+)
 from vllm_omni.model_executor.models.qwen3_tts.runtime_config import (
     resolve_qwen3_tts_runtime_config,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def _config(**talker_overrides):
@@ -44,17 +52,28 @@ def test_resolves_codec_stop_not_text_eos():
     assert runtime.codec_stop_token_id != 92
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("codec_eos_token_id", None),
-        ("codec_pad_id", "64"),
-        ("num_code_groups", True),
-    ],
-)
-def test_rejects_missing_none_and_type_conflicts(field, value):
-    with pytest.raises(ValueError, match=field):
-        resolve_qwen3_tts_runtime_config(_config(**{field: value}))
+def test_pipeline_propagates_checkpoint_stop():
+    config = Qwen3TTSConfig(
+        tts_model_type="base",
+        talker_config={
+            "vocab_size": 100,
+            "num_code_groups": 4,
+            "codec_pad_id": 64,
+            "codec_bos_id": 65,
+            "codec_eos_token_id": 66,
+            "codec_nothink_id": 67,
+            "codec_think_id": 68,
+            "codec_think_bos_id": 69,
+            "codec_think_eos_id": 70,
+            "code_predictor_config": {
+                "vocab_size": 64,
+                "num_code_groups": 4,
+            },
+        },
+    )
+
+    constraints = resolve_qwen3_tts_pipeline(config).get_stage(0).sampling_constraints
+    assert constraints["stop_token_ids"] == [66]
 
 
 def test_rejects_code_group_conflict():

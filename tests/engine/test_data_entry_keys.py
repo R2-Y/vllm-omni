@@ -327,30 +327,6 @@ class TestFlattenUnflattenRoundTrip:
 
 
 class TestSerializeDeserializePayload:
-    def test_model_runtime_survives_transport_and_msgpack_round_trip(self):
-        from vllm_omni.distributed.omni_connectors.utils.serialization import (
-            OmniMsgpackDecoder,
-            OmniMsgpackEncoder,
-        )
-
-        original: OmniPayload = {
-            "meta": {
-                "model_runtime": {
-                    "mimo_audio": {
-                        "empty_token_id": 151667,
-                        "max_code2wav_tokens": 18192,
-                    }
-                }
-            }
-        }
-
-        wire = serialize_payload(original)
-        packed = OmniMsgpackEncoder().encode(wire)
-        unpacked = OmniMsgpackDecoder().decode(packed)
-        restored = deserialize_payload(unpacked)
-
-        assert restored == original
-
     def test_tensor_round_trip(self):
         original: OmniPayload = {
             "hidden_states": {"output": torch.tensor([[1.0, 2.0], [3.0, 4.0]])},

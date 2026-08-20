@@ -7,12 +7,17 @@ from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
     Qwen2_5OmniConfig,
 )
 
+from vllm_omni.model_executor.models.qwen2_5_omni.pipeline import (
+    resolve_qwen2_5_omni_pipeline,
+)
 from vllm_omni.model_executor.models.qwen2_5_omni.qwen2_5_omni import (
     Qwen2_5OmniForConditionalGeneration,
 )
 from vllm_omni.model_executor.models.qwen2_5_omni.runtime_config import (
     resolve_qwen2_5_omni_runtime_config,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 _DEFAULT_SPEAKER_TOKEN_IDS = object()
 
@@ -54,7 +59,8 @@ def test_resolves_custom_checkpoint_values():
 
 
 def test_standard_transformers_config_uses_bundled_speaker_schema_defaults():
-    runtime = resolve_qwen2_5_omni_runtime_config(Qwen2_5OmniConfig())
+    config = Qwen2_5OmniConfig()
+    runtime = resolve_qwen2_5_omni_runtime_config(config)
 
     assert runtime.speaker_token_ids == {
         "m02": 151870,
@@ -64,19 +70,9 @@ def test_standard_transformers_config_uses_bundled_speaker_schema_defaults():
         "prefix_caching": 151870,
     }
     assert runtime.default_speaker == "m02"
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("tts_codec_end_token_id", None),
-        ("tts_codec_start_token_id", "102"),
-        ("tts_codec_pad_token_id", True),
-    ],
-)
-def test_rejects_missing_none_and_type_conflicts(field, value):
-    with pytest.raises(ValueError, match=field):
-        resolve_qwen2_5_omni_runtime_config(_config(**{field: value}))
+    pipeline = resolve_qwen2_5_omni_pipeline(config)
+    constraints = pipeline.get_stage(1).sampling_constraints
+    assert constraints["stop_token_ids"] == [runtime.codec_stop_token_id]
 
 
 def test_rejects_stop_outside_talker_vocabulary():

@@ -858,11 +858,8 @@ class TestPipelineRegistration:
         self,
         clean_pipeline_registry,
     ):
-        predicate_calls = []
-
         def predicate(_hf_config):
-            predicate_calls.append(_hf_config)
-            return True
+            raise AssertionError("non-matching resolver must not run")
 
         pipe_cfg = PipelineConfig(
             model_type="predicate_without_arch_match",
@@ -884,7 +881,6 @@ class TestPipelineRegistration:
             )
 
         assert pipeline_cfg is None
-        assert predicate_calls == [fake_config]
 
     def test_resolve_pipeline_architecture_fallback_resolves_callable_pipeline(self, clean_pipeline_registry):
         pipeline_key = "callable_architecture_fallback"
