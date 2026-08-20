@@ -6,11 +6,7 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
-    get_required_config_field,
-    pipeline_cfg_resolver,
-    replace_stage_sampling_constraints,
 )
-from vllm_omni.transformers_utils.configs.glm_tts import GLMTTSConfig
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.glm_tts"
 
@@ -27,7 +23,15 @@ GLM_TTS_PIPELINE = PipelineConfig(
             owns_tokenizer=True,
             engine_output_type="latent",
             async_chunk_process_next_stage_input_func=(f"{_PROC}.ar_to_dit_async_chunk"),
-            sampling_constraints={},
+            sampling_constraints={
+                # GLM-TTS uses 👂 (token string "👂", ID 59253) as
+                # end-of-audio marker.  The ID is resolved dynamically by
+                # GLMTTSForConditionalGeneration.__init__ from the tokenizer and
+                # validated at runtime against this hardcoded value.  If the
+                # upstream checkpoint changes the mapping, the model will log a
+                # warning so the constant here can be updated.
+                "stop_token_ids": [59253],
+            },
         ),
         StagePipelineConfig(
             stage_id=1,
@@ -41,26 +45,3 @@ GLM_TTS_PIPELINE = PipelineConfig(
         ),
     ),
 )
-
-
-@pipeline_cfg_resolver(
-    config_type=GLMTTSConfig,
-    default_pipeline_config=GLM_TTS_PIPELINE,
-)
-def resolve_glm_tts_pipeline(hf_config: GLMTTSConfig) -> PipelineConfig:
-    stop_token_id = get_required_config_field(
-        hf_config,
-        "eoa_token_id",
-        expected_type=int,
-        model="glm_tts",
-    )
-    if stop_token_id < 0:
-        raise ValueError(
-            "Model 'glm_tts' requires tokenizer-resolved config field 'eoa_token_id'; "
-            "populate it through the existing GLM tokenizer/config loading path"
-        )
-    return replace_stage_sampling_constraints(
-        GLM_TTS_PIPELINE,
-        stage_id=0,
-        updates={"stop_token_ids": [stop_token_id]},
-    )

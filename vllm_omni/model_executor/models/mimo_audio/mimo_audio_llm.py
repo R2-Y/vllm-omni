@@ -497,16 +497,17 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        # Special token IDs definition (corresponds to added_tokens.json)
+        self.empty_token_id = 151667  # <|empty|>
+        self.sostm_token_id = 151670  # <|sostm|>
+        self.eostm_token_id = 151671  # <|eostm|>
+        self.sosp_token_id = 151665  # <|sosp|>
+        self.eosp_token_id = 151666  # <|eosp|>
+        self.endoftext_token_id = 151643  # <|endoftext|>
+        self.im_end_token_id = 151645  # <|im_end|>
+
         config = vllm_config.model_config.hf_config
         config = MiMoAudioConfig(**vars(config)) if isinstance(config, Qwen2Config) else config
-        # Special IDs are checkpoint/config-owned and shared with the pipeline.
-        self.empty_token_id = config.empty_token_id
-        self.sostm_token_id = config.span_codec_start_token_id
-        self.eostm_token_id = config.no_interleave_next_token_id
-        self.sosp_token_id = config.speech_start_token_id
-        self.eosp_token_id = config.speech_end_token_id
-        self.endoftext_token_id = config.endoftext_token_id
-        self.im_end_token_id = config.im_end_token_id
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
@@ -926,8 +927,7 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
 
         has_merge_mm_embedding = len(merge_mm_embedding_info) > 0
 
-        # For multimodal audio generation, configured empty-token positions
-        # receive zero input embeddings.
+        # Only for multimodal inputs audio generation processing(Input_ids=151667), inputs_embeds will be all zeros
         kwargs["audio_embeds"] = self._audio_embeds_buffer[:, :seq_len, :].zero_()
         kwargs["mimo_audio_codes_processing"] = False
         kwargs["modality_preprocess"] = False

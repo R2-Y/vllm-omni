@@ -23,7 +23,6 @@ import torch
 import torch.nn as nn
 from vllm.logger import init_logger
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.transformers_utils.configs.omnivoice import OmniVoiceConfig
 
 logger = init_logger(__name__)
@@ -148,18 +147,8 @@ class OmniVoiceDecoder(nn.Module):
         state_dict = load_file(weights_path, device=str(device))
 
         # 1. Build RVQ quantizer
-        codebook_dim = get_required_config_field(
-            tokenizer_config,
-            "codebook_dim",
-            expected_type=int,
-            model="omnivoice",
-        )
-        codebook_size = get_required_config_field(
-            tokenizer_config,
-            "codebook_size",
-            expected_type=int,
-            model="omnivoice",
-        )
+        codebook_dim = tokenizer_config.get("codebook_dim", 64)
+        codebook_size = tokenizer_config.get("codebook_size", 1024)
         # Hidden size = quantizer project_out output dim
         hidden_size = state_dict["quantizer.quantizers.0.project_out.weight"].shape[0]
         num_quantizers = sum(

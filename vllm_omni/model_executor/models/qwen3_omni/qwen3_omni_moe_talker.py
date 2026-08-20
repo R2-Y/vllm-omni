@@ -18,7 +18,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_code_predictor_mtp import (
     Qwen3OmniMoeTalkerCodePredictor,
 )
@@ -86,13 +85,10 @@ class Qwen3OmniMoeTalkerForConditionalGeneration(
         # Precedence: rope_params["rope_theta"] (already set)
         #           > text_config.rope_theta (transformers <5.0.0 top-level attr)
         #           > 1000000 (Qwen3 Omni default)
-        if "rope_theta" not in rope_params:
-            rope_params["rope_theta"] = get_required_config_field(
-                talker_config.text_config,
-                "rope_theta",
-                expected_type=float,
-                model="qwen3_omni",
-            )
+        rope_params.setdefault(
+            "rope_theta",
+            getattr(talker_config.text_config, "rope_theta", 1000000),
+        )
         talker_config.text_config.rope_parameters = rope_params
         quant_config = vllm_config.quant_config
         if isinstance(quant_config, ComponentQuantizationConfig):

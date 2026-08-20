@@ -17,9 +17,7 @@ import pytest
 import torch
 
 from vllm_omni.model_executor.stage_input_processors.qwen2_5_omni import (
-    talker2code2wav_full_payload,
     thinker2talker_full_payload,
-    thinker2talker_token_only,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -85,40 +83,6 @@ def test_missing_hidden_returns_none():
     """Defensive: pooling_output without "hidden" returns None."""
     request = _make_request([1, 2], [3], status_name="FINISHED_STOPPED")
     assert thinker2talker_full_payload(transfer_manager=None, pooling_output={}, request=request) is None
-
-
-def test_sync_placeholder_does_not_copy_codec_token_ids():
-    source = SimpleNamespace(prompt_token_ids=[7, 8], request_id="r1")
-
-    [prompt] = thinker2talker_token_only([source])
-
-    assert prompt["prompt_token_ids"] == [0, 0, 0, 0]
-
-
-def test_talker_payload_uses_checkpoint_runtime_boundaries():
-    sampling_params = SimpleNamespace(
-        extra_args={
-            "model_runtime": {
-                "qwen2_5_omni": {
-                    "codec_pad_token_id": 40,
-                    "codec_stop_token_id": 42,
-                }
-            }
-        }
-    )
-    request = SimpleNamespace(
-        request_id="r1",
-        output_token_ids=[1, 2, 42],
-        sampling_params=sampling_params,
-    )
-
-    payload = talker2code2wav_full_payload(
-        transfer_manager=None,
-        pooling_output={},
-        request=request,
-    )
-
-    assert payload["codes"]["audio"] == [1, 2]
 
 
 if __name__ == "__main__":

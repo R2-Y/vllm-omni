@@ -16,13 +16,6 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
-    pipeline_cfg_resolver,
-)
-from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import (
-    Qwen3TTSConfig,
-)
-from vllm_omni.model_executor.models.qwen3_tts.pipeline import (
-    apply_qwen3_tts_sampling_constraints,
 )
 
 _AURA_PROC = "vllm_omni.model_executor.stage_input_processors.aura_omni"
@@ -72,6 +65,7 @@ AURA_OMNI_PIPELINE = PipelineConfig(
             async_chunk_process_next_stage_input_func=f"{_QWEN3_TTS_PROC}.talker2code2wav_async_chunk",
             sampling_constraints={
                 "detokenize": False,
+                "stop_token_ids": [2150],
             },
         ),
         StagePipelineConfig(
@@ -89,21 +83,3 @@ AURA_OMNI_PIPELINE = PipelineConfig(
         ),
     ),
 )
-
-
-@pipeline_cfg_resolver(
-    config_type=Qwen3TTSConfig,
-    default_pipeline_config=AURA_OMNI_PIPELINE,
-)
-def resolve_aura_omni_pipeline_with_qwen3_tts(
-    hf_config: Qwen3TTSConfig,
-) -> PipelineConfig:
-    """Resolve Aura when its parent model points at the reused TTS checkpoint."""
-    return apply_qwen3_tts_sampling_constraints(
-        AURA_OMNI_PIPELINE,
-        hf_config,
-        stage_id=2,
-    )
-
-
-resolve_aura_omni_pipeline = resolve_aura_omni_pipeline_with_qwen3_tts

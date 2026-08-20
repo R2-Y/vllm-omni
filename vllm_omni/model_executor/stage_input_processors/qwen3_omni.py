@@ -11,7 +11,6 @@ from typing import Any
 import torch
 from vllm.inputs import TextPrompt
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     EmbeddingsStruct,
@@ -24,12 +23,6 @@ from vllm_omni.data_entry_keys import (
 )
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.inputs.data import OmniTokensPrompt
-from vllm_omni.model_executor.models.qwen3_omni.runtime_config import (
-    get_required_qwen3_omni_runtime_int,
-    qwen3_omni_runtime_from_flat_pooling_output,
-    qwen3_omni_runtime_from_payload,
-    qwen3_omni_runtime_from_sampling_params,
-)
 from vllm_omni.model_executor.stage_input_processors.tts_utils import (
     extract_language_from_prompt,
     extract_language_from_request,
@@ -39,13 +32,19 @@ from vllm_omni.model_executor.stage_input_processors.tts_utils import (
 
 logger = logging.getLogger(__name__)
 
-# Pooling output layer key "0" is the word embedding.
+# Pooling output layer keys: "0" = word embedding, "24" = accept_hidden_layer
 _EMBED_LAYER_KEY = "0"
+_HIDDEN_LAYER_KEY = "24"
 # Per-model REPLACE-keys for the full-payload accumulator.  Keys in this
 # set use REPLACE semantics (subsequent emissions discard prior chunks)
 # instead of CONCAT.  qwen3-omni currently has none — model_outputs is
 # not emitted by the thinker/talker forward.
 _FULL_PAYLOAD_REPLACE_KEYS: frozenset[str] = frozenset()
+
+_QWEN3_CODEC_CODEBOOK_SIZE = 2048
+_QWEN3_CODEC_PAD_TOKEN_ID = 4196
+_QWEN3_CODEC_BOS_TOKEN_ID = 4197
+_QWEN3_CODEC_EOS_TOKEN_ID = 4198
 
 
 def _layer_tensor(layers: dict[Any, Any], key: str) -> torch.Tensor | None:
@@ -59,27 +58,11 @@ def _layer_tensor(layers: dict[Any, Any], key: str) -> torch.Tensor | None:
     return val if isinstance(val, torch.Tensor) else None
 
 
-def _compute_talker_prompt_ids_length(
-    info: OmniPayload,
-    runtime_meta: Mapping[str, Any],
-    device: torch.device | str = "cuda",
-) -> int:
-    im_start_token_id = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "im_start_token_id",
-    )
-    system_token_id = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "system_token_id",
-    )
-    user_token_id = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "user_token_id",
-    )
-    assistant_token_id = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "assistant_token_id",
-    )
+def _compute_talker_prompt_ids_length(info: OmniPayload, device: torch.device | str = "cuda") -> int:
+    im_start_token_id = 151644
+    system_token_id = 8948
+    user_token_id = 872
+    assistant_token_id = 77091
 
     ids = info.get("ids", {})
     thinker_sequences = torch.tensor(ids["all"], dtype=torch.long, device=device).unsqueeze(0)  # [1, T]
@@ -134,19 +117,17 @@ def _as_tensor_or_none(value: Any) -> torch.Tensor | None:
     return None
 
 
-def _is_valid_qwen3_codec_token_id(token_id: Any, codebook_size: int) -> bool:
+def _is_valid_qwen3_codec_token_id(token_id: Any) -> bool:
     try:
         token_id = int(token_id)
     except (TypeError, ValueError):
         return False
-    return 0 <= token_id < codebook_size
+    return 0 <= token_id < _QWEN3_CODEC_CODEBOOK_SIZE
 
 
 def _extract_qwen3_full_payload_codec_rows(
     code_predictor_codes: torch.Tensor,
     output_token_ids: list[int],
-    *,
-    codebook_size: int,
 ) -> tuple[torch.Tensor, dict[str, int]]:
     """Filter full-payload codec rows by the authoritative output ids."""
     if code_predictor_codes.ndim != 2 or code_predictor_codes.numel() == 0:
@@ -175,11 +156,13 @@ def _extract_qwen3_full_payload_codec_rows(
     aligned_rows = code_predictor_codes[-aligned_len:]
     aligned_token_ids = output_token_ids[-aligned_len:]
     aligned_token_mask = torch.tensor(
-        [_is_valid_qwen3_codec_token_id(token_id, codebook_size) for token_id in aligned_token_ids],
+        [_is_valid_qwen3_codec_token_id(token_id) for token_id in aligned_token_ids],
         dtype=torch.bool,
         device=aligned_rows.device,
     )
-    row_valid_mask = (aligned_rows.max(dim=1).values < codebook_size) & (aligned_rows.min(dim=1).values >= 0)
+    row_valid_mask = (aligned_rows.max(dim=1).values < _QWEN3_CODEC_CODEBOOK_SIZE) & (
+        aligned_rows.min(dim=1).values >= 0
+    )
     filtered_rows = aligned_rows[aligned_token_mask & row_valid_mask]
     if filtered_rows.numel() == 0:
         filtered_rows = aligned_rows[:0]
@@ -227,15 +210,10 @@ def _merge_pd_embeddings(
 
     where overlap = P + D - expected_total.
     """
-    runtime_meta = qwen3_omni_runtime_from_payload(prefill_mm)
-    hidden_layer_key = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "accept_hidden_layer",
-    )
     try:
         p_layers = prefill_mm.get("hidden_states", {}).get("layers", {})
         p_emb = p_layers[int(_EMBED_LAYER_KEY)].detach().to(device=device, dtype=torch.float)
-        p_hid = p_layers[hidden_layer_key].detach().to(device=device, dtype=torch.float)
+        p_hid = p_layers[int(_HIDDEN_LAYER_KEY)].detach().to(device=device, dtype=torch.float)
     except (KeyError, AttributeError, TypeError) as exc:
         available_keys = list(prefill_mm.keys()) if isinstance(prefill_mm, Mapping) else type(prefill_mm).__name__
         logger.error(
@@ -244,7 +222,7 @@ def _merge_pd_embeddings(
             "Falling back to decode-only embeddings – talker user-segment will be degraded.",
             exc,
             _EMBED_LAYER_KEY,
-            hidden_layer_key,
+            _HIDDEN_LAYER_KEY,
             available_keys,
         )
         return decode_emb, decode_hid
@@ -476,15 +454,8 @@ def thinker2talker_async_chunk(
     thinker_layers = thinker_hs.get("layers", {}) if isinstance(thinker_hs, dict) else {}
     thinker_embed_raw = multimodal_output.get("embed", {})
     thinker_embed = thinker_embed_raw if isinstance(thinker_embed_raw, dict) else {}
-    runtime_meta = qwen3_omni_runtime_from_payload(multimodal_output)
-    hidden_layer_key = str(
-        get_required_qwen3_omni_runtime_int(
-            runtime_meta,
-            "accept_hidden_layer",
-        )
-    )
     thinker_emb = _layer_tensor(thinker_layers, _EMBED_LAYER_KEY)
-    thinker_hid = _layer_tensor(thinker_layers, hidden_layer_key)
+    thinker_hid = _layer_tensor(thinker_layers, _HIDDEN_LAYER_KEY)
     if thinker_emb is None or thinker_hid is None:
         logger.debug(
             "thinker2talker_async_chunk: missing thinker layers for req=%s (embed=%s hidden=%s)",
@@ -571,17 +542,12 @@ def thinker2talker_full_payload(
         )
         return None
 
-    runtime_meta = qwen3_omni_runtime_from_flat_pooling_output(pooling_output)
-    accept_hidden_layer = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "accept_hidden_layer",
-    )
     layers = {
         0: pooling_output.get("hidden_states.layer_0"),
-        accept_hidden_layer: pooling_output.get(f"hidden_states.layer_{accept_hidden_layer}"),
+        24: pooling_output.get("hidden_states.layer_24"),
     }
     thinker_emb = _layer_tensor(layers, _EMBED_LAYER_KEY)
-    thinker_hid = _layer_tensor(layers, str(accept_hidden_layer))
+    thinker_hid = _layer_tensor(layers, _HIDDEN_LAYER_KEY)
     if thinker_emb is None:
         hidden = pooling_output.get("hidden")
         thinker_emb = hidden if isinstance(hidden, torch.Tensor) else None
@@ -652,7 +618,6 @@ def thinker2talker_token_only(
     prompt: OmniTokensPrompt | TextPrompt | None = None,
     requires_multimodal_data: bool = False,
     streaming_context: Any | None = None,
-    sampling_params: Any | None = None,
 ) -> list[OmniTokensPrompt]:
     """Orchestrator-side placeholder builder for Stage-1 (Talker) when
     ``async_chunk=False``.
@@ -668,7 +633,6 @@ def thinker2talker_token_only(
     ``prompt`` / ``requires_multimodal_data`` are kept for call-site signature
     compatibility with other orchestrator input processors; they are unused.
     """
-    runtime_meta = qwen3_omni_runtime_from_sampling_params(sampling_params)
     talker_inputs: list[OmniTokensPrompt] = []
     for i, thinker_output in enumerate(source_outputs):
         output = thinker_output.outputs[0]
@@ -688,11 +652,7 @@ def thinker2talker_token_only(
         thinker_sequences = prompt_token_ids + output_ids
         thinker_input_ids = prompt_token_ids
         info_for_len = {"ids": {"all": thinker_sequences, "prompt": thinker_input_ids}}
-        prompt_len = _compute_talker_prompt_ids_length(
-            info_for_len,
-            runtime_meta,
-            device="cpu",
-        )
+        prompt_len = _compute_talker_prompt_ids_length(info_for_len, device="cpu")
         # Keep this fallback until the connector reliably preserves voice metadata.
         additional_information = to_dict(
             OmniPayloadStruct(
@@ -756,21 +716,9 @@ def talker2code2wav_async_chunk(
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_size_config = get_required_config_field(
-        cfg, "codec_chunk_frames", expected_type=int, model="qwen3_omni"
-    )
-    left_context_size_config = get_required_config_field(
-        cfg,
-        "codec_left_context_frames",
-        expected_type=int,
-        model="qwen3_omni",
-    )
-    configured_initial_chunk_size = get_required_config_field(
-        cfg,
-        "initial_codec_chunk_frames",
-        expected_type=int,
-        model="qwen3_omni",
-    )
+    chunk_size_config = int(cfg.get("codec_chunk_frames", 25))
+    left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
+    configured_initial_chunk_size = int(cfg.get("initial_codec_chunk_frames") or 0)
 
     chunk_id = transfer_manager.put_req_chunk[request_id]
     length = len(transfer_manager.code_prompt_token_ids[request_id])
@@ -848,17 +796,11 @@ def talker2code2wav_full_payload(
         )
         return None
 
-    runtime_meta = qwen3_omni_runtime_from_sampling_params(getattr(request, "sampling_params", None))
-    codebook_size = get_required_qwen3_omni_runtime_int(
-        runtime_meta,
-        "codebook_size",
-    )
     output_token_ids = _ensure_list(getattr(request, "output_token_ids", []) or [])
     raw_shape = tuple(code_predictor_codes.shape)
     code_predictor_codes, codec_stats = _extract_qwen3_full_payload_codec_rows(
         code_predictor_codes.to(torch.long),
         list(output_token_ids),
-        codebook_size=codebook_size,
     )
     if code_predictor_codes.numel() == 0:
         logger.warning(
@@ -876,40 +818,16 @@ def talker2code2wav_full_payload(
     codec_codes = code_predictor_codes.transpose(0, 1).cpu().reshape(-1).tolist()
     logger.debug(
         "talker2code2wav_full_payload: raw_shape=%s output_ids_len=%s aligned_rows=%s "
-        "valid_rows=%s placeholders=%s flattened_len=%s pad=%s bos=%s eos=%s",
+        "valid_rows=%s placeholders=%s flattened_len=%s pad4196=%s bos4197=%s eos4198=%s",
         raw_shape,
         len(output_token_ids),
         codec_stats["aligned_rows"],
         codec_stats["valid_rows"],
         codec_stats["trailing_placeholder_count"],
         len(codec_codes),
-        sum(
-            1
-            for tid in output_token_ids
-            if tid
-            == get_required_qwen3_omni_runtime_int(
-                runtime_meta,
-                "codec_pad_token_id",
-            )
-        ),
-        sum(
-            1
-            for tid in output_token_ids
-            if tid
-            == get_required_qwen3_omni_runtime_int(
-                runtime_meta,
-                "codec_bos_token_id",
-            )
-        ),
-        sum(
-            1
-            for tid in output_token_ids
-            if tid
-            == get_required_qwen3_omni_runtime_int(
-                runtime_meta,
-                "sampled_stop_token_id",
-            )
-        ),
+        sum(1 for tid in output_token_ids if tid == _QWEN3_CODEC_PAD_TOKEN_ID),
+        sum(1 for tid in output_token_ids if tid == _QWEN3_CODEC_BOS_TOKEN_ID),
+        sum(1 for tid in output_token_ids if tid == _QWEN3_CODEC_EOS_TOKEN_ID),
     )
     return {
         "codes": {"audio": codec_codes},

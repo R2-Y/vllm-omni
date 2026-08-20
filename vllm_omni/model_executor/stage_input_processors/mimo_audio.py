@@ -1,31 +1,35 @@
-from collections.abc import Mapping
 from typing import Any
 
 import torch
 from vllm.logger import init_logger
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     MetaStruct,
     OmniPayload,
     OmniPayloadStruct,
 )
-from vllm_omni.model_executor.models.mimo_audio.runtime_config import (
-    get_required_mimo_audio_runtime_int,
-    mimo_audio_runtime_from_meta,
-    mimo_audio_runtime_from_sampling_params,
-)
+from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import TALKER_CODEC_PAD_TOKEN_ID
 
 logger = init_logger(__name__)
 
+# Maximum tokens supported by the code2wav stage. The flattened talker codec
+# sequence fed to stage-1 must not exceed this, otherwise gpu_input_batch
+# add_request will fail with a broadcast error when copying prompt_token_ids
+# into token_ids_cpu. Keep in sync with the stage-1 ``max_model_len`` in
+# ``vllm_omni/deploy/mimo_audio.yaml`` and the offline example
+# ``examples/offline_inference/mimo_audio/end2end.py``.
+MAX_CODE2WAV_TOKENS = 18192
+
 # Minimum safe values for codec streaming parameters.
-# codec_left_context_frames must cover the checkpoint vocoder attention window.
-# Values below the minimum
+# codec_left_context_frames must cover the vocoder attention window
+# (vocoder_attn_window_size defaults to [40, 10]).  Values below the minimum
 # cause acoustic-state resets at chunk boundaries, producing voice instability
 # (multiple speakers / timbre shifts in the output audio).
 _MIN_CODEC_CHUNK_FRAMES = 3
 _MIN_CODEC_LEFT_CONTEXT_FRAMES = 40
+_DEFAULT_CODEC_CHUNK_FRAMES = 10
+_DEFAULT_CODEC_LEFT_CONTEXT_FRAMES = 40
 
 
 def prepend_and_flatten_colmajor(x: torch.Tensor, pad_vec: torch.Tensor) -> torch.Tensor:
@@ -76,7 +80,6 @@ def _flush_remaining_codes(
     request_id: str,
     chunk_size: int,
     left_context_size: int,
-    runtime: Mapping[str, Any],
 ) -> OmniPayloadStruct:
     """Flush any accumulated but unsent codes when the request finishes."""
     accumulated = transfer_manager.code_prompt_token_ids.get(request_id, [])
@@ -104,7 +107,6 @@ def _flush_remaining_codes(
             codec_left_context_frames=left_context_size,
             code_flat_numel=int(flat_codes.numel()),
             finished=torch.tensor(True, dtype=torch.bool),
-            model_runtime={"mimo_audio": dict(runtime)},
         ),
     )
 
@@ -143,12 +145,6 @@ def llm2code2wav_async_chunk(
     Accumulates codes in connector per request_id,
     returns payload only when chunk_size is full or request is finished; returns None when waiting.
     """
-    meta = multimodal_output.get("meta") if isinstance(multimodal_output, dict) else None
-    if isinstance(meta, Mapping) and "model_runtime" in meta:
-        runtime = mimo_audio_runtime_from_meta(meta)
-    else:
-        runtime = mimo_audio_runtime_from_sampling_params(getattr(request, "sampling_params", None))
-
     # Null guard: chunk_transfer_adapter calls this every emit step
     # including no-output steps where multimodal_output is None.
     if multimodal_output is None or not isinstance(multimodal_output, dict):
@@ -156,41 +152,34 @@ def llm2code2wav_async_chunk(
             connector = getattr(transfer_manager, "connector", None)
             raw_cfg = getattr(connector, "config", {}) or {}
             cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-            chunk_size = get_required_config_field(
-                cfg, "codec_chunk_frames", expected_type=int, model="mimo_audio"
-            )
-            left_context_size = get_required_config_field(
-                cfg,
-                "codec_left_context_frames",
-                expected_type=int,
-                model="mimo_audio",
-            )
+            chunk_size = int(cfg.get("codec_chunk_frames", 3))
+            left_context_size = int(cfg.get("codec_left_context_frames", 3))
             request_id = getattr(request, "external_req_id", None)
-            return _flush_remaining_codes(transfer_manager, request_id, chunk_size, left_context_size, runtime)
+            return _flush_remaining_codes(transfer_manager, request_id, chunk_size, left_context_size)
         return None
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_size = get_required_config_field(
-        cfg, "codec_chunk_frames", expected_type=int, model="mimo_audio"
-    )
+    chunk_size = int(cfg.get("codec_chunk_frames", _DEFAULT_CODEC_CHUNK_FRAMES))
     if chunk_size < _MIN_CODEC_CHUNK_FRAMES:
-        raise ValueError(
-            f"MiMo Audio codec_chunk_frames must be >= {_MIN_CODEC_CHUNK_FRAMES}; "
-            f"got {chunk_size}"
+        logger.warning(
+            "codec_chunk_frames=%d is below minimum %d; falling back to %d.",
+            chunk_size,
+            _MIN_CODEC_CHUNK_FRAMES,
+            _DEFAULT_CODEC_CHUNK_FRAMES,
         )
+        chunk_size = _DEFAULT_CODEC_CHUNK_FRAMES
 
-    left_context_size = get_required_config_field(
-        cfg,
-        "codec_left_context_frames",
-        expected_type=int,
-        model="mimo_audio",
-    )
+    left_context_size = int(cfg.get("codec_left_context_frames", _DEFAULT_CODEC_LEFT_CONTEXT_FRAMES))
     if left_context_size < _MIN_CODEC_LEFT_CONTEXT_FRAMES:
-        raise ValueError(
-            "MiMo Audio codec_left_context_frames must cover the vocoder attention "
-            f"window ({_MIN_CODEC_LEFT_CONTEXT_FRAMES}); got {left_context_size}"
+        logger.warning(
+            "codec_left_context_frames=%d is below minimum %d (must cover vocoder attention window); "
+            "falling back to %d to prevent voice instability.",
+            left_context_size,
+            _MIN_CODEC_LEFT_CONTEXT_FRAMES,
+            _DEFAULT_CODEC_LEFT_CONTEXT_FRAMES,
         )
+        left_context_size = _DEFAULT_CODEC_LEFT_CONTEXT_FRAMES
 
     request_id = getattr(request, "external_req_id", None)
 
@@ -200,18 +189,17 @@ def llm2code2wav_async_chunk(
     po_codes = multimodal_output.get("codes", {}) if multimodal_output is not None else {}
     if "audio" not in po_codes:
         if is_finished:
-            return _flush_remaining_codes(transfer_manager, request_id, chunk_size, left_context_size, runtime)
+            return _flush_remaining_codes(transfer_manager, request_id, chunk_size, left_context_size)
         return None
 
     code_predictor_codes = po_codes["audio"]
     code_tensor = _to_code_tensor(code_predictor_codes)
     if code_tensor is None:
         if is_finished:
-            return _flush_remaining_codes(transfer_manager, request_id, chunk_size, left_context_size, runtime)
+            return _flush_remaining_codes(transfer_manager, request_id, chunk_size, left_context_size)
         return None
 
-    pad_token_id = get_required_mimo_audio_runtime_int(runtime, "empty_token_id")
-    pad_vec = torch.tensor([pad_token_id] * 4, device=code_tensor.device, dtype=code_tensor.dtype)
+    pad_vec = torch.tensor([TALKER_CODEC_PAD_TOKEN_ID] * 4, device=code_tensor.device, dtype=code_tensor.dtype)
     code_list = prepend_and_flatten_colmajor(code_tensor, pad_vec).tolist()
 
     if request_id is None:
@@ -236,7 +224,6 @@ def llm2code2wav_async_chunk(
             codec_left_context_frames=left_context_size,
             code_flat_numel=len(flat_codes),
             finished=torch.tensor(is_finished, dtype=torch.bool),
-            model_runtime={"mimo_audio": dict(runtime)},
         ),
     )
 
@@ -279,10 +266,6 @@ def llm2code2wav_token_only(
     source_outputs: list,
     _prompt=None,
     _requires_multimodal_data: bool = False,
-    *,
-    sampling_params: Any | None = None,
-    source_sampling_params: Any | None = None,
-    target_sampling_params: Any | None = None,
 ) -> list:
     """Sync-side placeholder for the non-async-chunk Stage-1 (code2wav) input.
 
@@ -298,27 +281,6 @@ def llm2code2wav_token_only(
         out = output_wrapper.outputs[0]
         mm = out.multimodal_output if hasattr(out, "multimodal_output") else None
         mm = mm if isinstance(mm, dict) else {}
-        mm_meta = mm.get("meta") if isinstance(mm, dict) else None
-        runtime_params = (
-            source_sampling_params
-            if source_sampling_params is not None
-            else target_sampling_params
-            if target_sampling_params is not None
-            else sampling_params
-        )
-        if runtime_params is not None:
-            runtime = mimo_audio_runtime_from_sampling_params(runtime_params)
-        elif isinstance(mm_meta, Mapping) and "model_runtime" in mm_meta:
-            runtime = mimo_audio_runtime_from_meta(mm_meta)
-        else:
-            sampling_params = getattr(output_wrapper, "sampling_params", None) or getattr(
-                out,
-                "sampling_params",
-                None,
-            )
-            runtime = mimo_audio_runtime_from_sampling_params(sampling_params)
-        get_required_mimo_audio_runtime_int(runtime, "empty_token_id")
-        max_code2wav_tokens = get_required_mimo_audio_runtime_int(runtime, "max_code2wav_tokens")
         mm_codes = mm.get("codes", {}) if isinstance(mm, dict) else {}
         prompt_len = 0
         if isinstance(mm_codes, dict) and "audio" in mm_codes:
@@ -329,8 +291,8 @@ def llm2code2wav_token_only(
                 # +B*4 per batch row for the prepended pad_vec (see prepend_and_flatten_colmajor)
                 batch_size = int(audio.shape[0]) if audio.ndim >= 1 else 1
                 prompt_len = int(audio.numel()) + batch_size * 4
-        if prompt_len > max_code2wav_tokens:
-            prompt_len = max_code2wav_tokens
+        if prompt_len > MAX_CODE2WAV_TOKENS:
+            prompt_len = MAX_CODE2WAV_TOKENS
         code2wav_inputs.append(
             OmniTokensPrompt(
                 prompt_token_ids=[0] * prompt_len,
@@ -359,11 +321,6 @@ def llm2code2wav_full_payload(
     """
     del transfer_manager
     rid = getattr(request, "request_id", "?")
-    flat_runtime = pooling_output.get("meta.model_runtime") if isinstance(pooling_output, dict) else None
-    if isinstance(flat_runtime, Mapping):
-        runtime = mimo_audio_runtime_from_meta({"model_runtime": flat_runtime})
-    else:
-        runtime = mimo_audio_runtime_from_sampling_params(getattr(request, "sampling_params", None))
     if not isinstance(pooling_output, dict):
         logger.warning(
             "mimo_audio.llm2code2wav_full_payload: pooling_output not a dict "
@@ -395,17 +352,12 @@ def llm2code2wav_full_payload(
         )
         return None
 
-    pad_token_id = get_required_mimo_audio_runtime_int(runtime, "empty_token_id")
-    max_code2wav_tokens = get_required_mimo_audio_runtime_int(runtime, "max_code2wav_tokens")
-    pad_vec = torch.tensor([pad_token_id] * 4)
+    pad_vec = torch.tensor([TALKER_CODEC_PAD_TOKEN_ID] * 4)
     code_final = prepend_and_flatten_colmajor(codec_codes, pad_vec).tolist()
-    if len(code_final) > max_code2wav_tokens:
-        code_final = code_final[:max_code2wav_tokens]
+    if len(code_final) > MAX_CODE2WAV_TOKENS:
+        code_final = code_final[:MAX_CODE2WAV_TOKENS]
 
     return {
         "codes": {"audio": code_final},
-        "meta": {
-            "finished": torch.tensor(True, dtype=torch.bool),
-            "model_runtime": {"mimo_audio": dict(runtime)},
-        },
+        "meta": {"finished": torch.tensor(True, dtype=torch.bool)},
     }

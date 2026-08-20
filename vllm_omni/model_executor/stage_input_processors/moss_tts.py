@@ -13,12 +13,10 @@ import torch
 from vllm.inputs import TokensPrompt as OmniTokensPrompt
 from vllm.logger import init_logger
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import CodesStruct, MetaStruct, OmniPayloadStruct
 
 logger = init_logger(__name__)
 
-# One-past-codebook pad code in the MOSS RVQ inter-stage tensor protocol.
 _MOSS_AUDIO_PAD_CODE = 1024
 
 
@@ -271,12 +269,8 @@ def talker2codec_raw_async_chunk(
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
     cfg = cfg if isinstance(cfg, dict) else {}
-    chunk_frames = get_required_config_field(
-        cfg, "codec_chunk_frames", expected_type=int, model="moss_tts"
-    )
-    initial_chunk_frames = get_required_config_field(
-        cfg, "initial_codec_chunk_frames", expected_type=int, model="moss_tts"
-    )
+    chunk_frames = int(cfg.get("codec_chunk_frames", 15) or 15)
+    initial_chunk_frames = int(cfg.get("initial_codec_chunk_frames") or 0)
     if chunk_frames <= 0:
         raise ValueError(f"codec_chunk_frames must be positive for MOSS raw streaming, got {chunk_frames}")
     if initial_chunk_frames < 0:

@@ -40,8 +40,6 @@ from vllm_omni.model_executor.models.utils import (
 )
 from vllm_omni.platforms import current_omni_platform
 
-from .runtime_config import resolve_moss_tts_nano_runtime_config
-
 logger = init_logger(__name__)
 
 
@@ -180,7 +178,6 @@ class MossTTSNanoForGeneration(nn.Module):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
-        self.runtime_config = resolve_moss_tts_nano_runtime_config(self.config)
         self.model_path: str = vllm_config.model_config.model
 
         # Eager construction (not in load_weights) -- see module docstring.
@@ -302,7 +299,7 @@ class MossTTSNanoForGeneration(nn.Module):
         text: str = str(_pick(info, "text", "") or "")
         if not text.strip():
             logger.warning("MOSS-TTS-Nano received empty text; yielding silence.")
-            sr = self.runtime_config.audio_tokenizer_sample_rate
+            sr = getattr(self.config, "audio_tokenizer_sample_rate", 48000)
             yield torch.zeros((sr,), dtype=torch.float32), True
             return
 
@@ -434,7 +431,7 @@ class MossTTSNanoForGeneration(nn.Module):
     def _make_dummy_hidden(self, input_ids: torch.Tensor | None) -> torch.Tensor:
         """Return a dummy hidden_states tensor for the AR runner."""
         device = self._device or torch.device("cpu")
-        hidden = self.runtime_config.hidden_size
+        hidden = int(getattr(self.config, "hidden_size", 768))
         n = 1 if input_ids is None else max(1, input_ids.shape[0])
         return torch.zeros((n, hidden), device=device, dtype=torch.float32)
 
@@ -448,7 +445,7 @@ class MossTTSNanoForGeneration(nn.Module):
         runtime_additional_information: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> OmniOutput:
-        sr = self.runtime_config.audio_tokenizer_sample_rate
+        sr = getattr(self.config, "audio_tokenizer_sample_rate", 48000)
         sr_tensor = torch.tensor(sr, dtype=torch.int32)
         empty = torch.zeros((0,), dtype=torch.float32)
         hidden = self._make_dummy_hidden(input_ids)
@@ -559,15 +556,15 @@ class MossTTSNanoForGeneration(nn.Module):
         elif hidden_states.ndim > 2:
             hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
 
-        vocab_size = self.runtime_config.vocab_size
+        vocab_size = int(getattr(self.config, "vocab_size", 32000))
         num_rows = int(hidden_states.shape[0])
         logits = torch.zeros(
             (num_rows, vocab_size),
             dtype=torch.float32,
             device=hidden_states.device,
         )
-        eos_id = self.runtime_config.eos_token_id
-        safe_id = self.runtime_config.streaming_continue_token_id
+        eos_id = 2 if vocab_size > 2 else 0
+        safe_id = 1 if vocab_size > 1 and 1 != eos_id else 0
 
         flags = self._ar_last_chunk_flags
         # If we lost alignment with the forward batch (e.g. scheduler dropped
@@ -588,7 +585,7 @@ class MossTTSNanoForGeneration(nn.Module):
         multimodal_embeddings=None,
         is_multimodal=None,
     ) -> torch.Tensor:
-        hidden = self.runtime_config.hidden_size
+        hidden = int(getattr(self.config, "hidden_size", 768))
         return torch.zeros(
             (input_ids.shape[0], hidden),
             device=input_ids.device,

@@ -51,7 +51,6 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.common.nucleus_ras_sampling import ras_sample_one as _ras_sample_one
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.platforms import current_omni_platform
@@ -70,6 +69,8 @@ logger = init_logger(__name__)
 
 _GLM_TTS_DEFAULT_REPO_ID = "zai-org/GLM-TTS"
 _GLM_TTS_TOKENIZER_SUBDIR = "vq32k-phoneme-tokenizer"
+_GLM_TTS_MAX_PROMPT_SPEECH_TOKENS = 1024
+
 
 def _req_float(param: torch.Tensor | None, req_idx: int, default: float) -> float:
     if param is None or param.numel() == 0:
@@ -354,17 +355,7 @@ class GLMTTSMultiModalProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int] | None:
         if mm_counts.get("audio", 0) <= 0:
             return {}
-        return {
-            "audio": min(
-                seq_len,
-                get_required_config_field(
-                    self.get_hf_config(),
-                    "max_prompt_speech_tokens",
-                    expected_type=int,
-                    model="glm_tts",
-                ),
-            )
-        }
+        return {"audio": min(seq_len, _GLM_TTS_MAX_PROMPT_SPEECH_TOKENS)}
 
     def get_data_parser(self):
         return MultiModalDataParser(
@@ -479,21 +470,8 @@ class GLMTTSMultiModalProcessor(BaseMultiModalProcessor[GLMTTSMultiModalProcessi
             normalized_text = _normalize_glm_tts_processor_text(self.text_frontend, prompt)
             text_ids = self._encode_text(normalized_text)
             dummy_audio_len = min(
-                get_required_config_field(
-                    config,
-                    "max_prompt_speech_tokens",
-                    expected_type=int,
-                    model="glm_tts",
-                ),
-                max(
-                    1,
-                    get_required_config_field(
-                        config,
-                        "max_position_embeddings",
-                        expected_type=int,
-                        model="glm_tts",
-                    ),
-                ),
+                _GLM_TTS_MAX_PROMPT_SPEECH_TOKENS,
+                max(1, int(getattr(config, "max_position_embeddings", _GLM_TTS_MAX_PROMPT_SPEECH_TOKENS))),
             )
             boa_tensor = torch.tensor([[int(self.special_ids["boa"])]], dtype=torch.long)
             input_ids = torch.cat([text_ids, boa_tensor], dim=1)
@@ -816,19 +794,8 @@ class GLMTTSForConditionalGeneration(nn.Module, SupportsMultiModal):
                 f"Check model's config.json has correct vocab_size."
             )
 
-        configured_eoa = get_required_config_field(
-            config,
-            "eoa_token_id",
-            expected_type=int,
-            model="glm_tts",
-        )
-        if configured_eoa != self._eoa:
-            raise ValueError(
-                "GLM-TTS tokenizer/config stop mismatch: "
-                f"config eoa_token_id={configured_eoa}, tokenizer eoa={self._eoa}"
-            )
-
-        # Keep standard HF aliases synchronized with the validated EOA.
+        # Update config with dynamic token IDs so vLLM uses correct eos_token
+        # This enables proper stop detection when EOA is sampled
         config.eos_token_id = self._eoa
         config.eoa_token_id = self._eoa
         config.audio_token_start = self._ats
@@ -860,11 +827,24 @@ class GLMTTSForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
+        # Runtime validation: dynamic EOA must match the hardcoded pipeline
+        # stop_token_ids constant (59253).  A mismatch means the upstream
+        # tokenizer vocabulary has changed and pipeline.py needs updating.
+        _PIPELINE_EOA = 59253
+        if self._eoa != _PIPELINE_EOA:
+            logger.warning(
+                "GLM-TTS EOA token mismatch: tokenizer resolved %d but "
+                "pipeline.py hardcodes stop_token_ids=[%d]. Update "
+                "pipeline.py to match the current checkpoint.",
+                self._eoa,
+                _PIPELINE_EOA,
+            )
+
         # RAS sampling config — stored as attributes for sample()
-        self._ras_win_size = int(config.ras_win_size)
-        self._ras_tau_r = float(config.ras_tau_r)
-        self._ras_top_p = float(config.ras_top_p)
-        self._ras_top_k = int(config.ras_top_k)
+        self._ras_win_size = int(getattr(config, "ras_win_size", 10))
+        self._ras_tau_r = float(getattr(config, "ras_tau_r", 0.1))
+        self._ras_top_p = float(getattr(config, "ras_top_p", 0.8))
+        self._ras_top_k = int(getattr(config, "ras_top_k", 25))
 
     def _model_dtype(self) -> torch.dtype:
         """Return the active parameter dtype for locally-created embeddings."""

@@ -54,7 +54,7 @@ def test_strip_stop_token_basic():
     codes = torch.tensor([10, 20, 30, STOP_MEL_TOKEN, 99])
     latent = torch.randn(5, LATENT_DIM)
 
-    c, lat, lens = _strip_stop_token(codes, latent, stop_mel_token=8193)
+    c, lat, lens = _strip_stop_token(codes, latent)
 
     assert c.shape == (1, 3)
     assert lat.shape == (1, 3, LATENT_DIM)
@@ -62,18 +62,11 @@ def test_strip_stop_token_basic():
     assert (c[0] == torch.tensor([10, 20, 30])).all()
 
 
-def test_strip_stop_token_uses_runtime_configured_id():
-    codes = torch.tensor([[10, 77, STOP_MEL_TOKEN]])
-    c, _, lens = _strip_stop_token(codes, None, stop_mel_token=77)
-    assert c.tolist() == [[10]]
-    assert lens.tolist() == [1]
-
-
 def test_strip_stop_token_no_stop():
     codes = torch.tensor([10, 20, 30])
     latent = torch.randn(3, LATENT_DIM)
 
-    c, lat, lens = _strip_stop_token(codes, latent, stop_mel_token=8193)
+    c, lat, lens = _strip_stop_token(codes, latent)
 
     assert c.shape == (1, 3)
     assert lens.tolist() == [3]
@@ -83,7 +76,7 @@ def test_strip_stop_token_at_start():
     codes = torch.tensor([STOP_MEL_TOKEN, 10, 20])
     latent = torch.randn(3, LATENT_DIM)
 
-    c, lat, lens = _strip_stop_token(codes, latent, stop_mel_token=8193)
+    c, lat, lens = _strip_stop_token(codes, latent)
 
     assert c.shape == (1, 0)
     assert lat.shape == (1, 0, LATENT_DIM)
@@ -99,7 +92,7 @@ def test_strip_stop_token_batch_with_padding():
     )
     latent = torch.randn(2, 4, LATENT_DIM)
 
-    c, lat, lens = _strip_stop_token(codes, latent, stop_mel_token=8193)
+    c, lat, lens = _strip_stop_token(codes, latent)
 
     assert c.shape == (2, 3)
     assert lat.shape == (2, 3, LATENT_DIM)
@@ -111,7 +104,7 @@ def test_strip_stop_token_all_stop():
     codes = torch.tensor([STOP_MEL_TOKEN])
     latent = torch.randn(1, LATENT_DIM)
 
-    c, lat, lens = _strip_stop_token(codes, latent, stop_mel_token=8193)
+    c, lat, lens = _strip_stop_token(codes, latent)
 
     assert lens.tolist() == [0]
     assert c.shape[1] == 0
@@ -124,7 +117,6 @@ def test_strip_stop_token_all_stop():
 def _conditioning_tensors():
     return {
         "use_gpt_latent": True,
-        "stop_mel_token": STOP_MEL_TOKEN,
         "S_ref": torch.randn(1, 3, LATENT_DIM),
         "ref_mel": torch.randn(1, 80, 5),
         "style": torch.randn(1, 4),
@@ -153,7 +145,6 @@ def test_talker2s2mel_full_payload_flat_keys_builds_s2mel_contract():
         "meta.ref_mel": cond["ref_mel"],
         "meta.style": cond["style"],
         "meta.use_gpt_latent": True,
-        "meta.stop_mel_token": STOP_MEL_TOKEN,
         "meta.duration_factor": 0.5,
     }
 
@@ -180,7 +171,6 @@ def test_talker2s2mel_full_payload_defaults_missing_duration_factor_to_one():
         "meta.ref_mel": cond["ref_mel"],
         "meta.style": cond["style"],
         "meta.use_gpt_latent": True,
-        "meta.stop_mel_token": STOP_MEL_TOKEN,
     }
 
     result = talker2s2mel_full_payload(None, payload, SimpleNamespace(request_id="r-default-duration"))
@@ -198,7 +188,6 @@ def test_talker2s2mel_full_payload_preserves_explicit_request_seed():
         "meta.ref_mel": cond["ref_mel"],
         "meta.style": cond["style"],
         "meta.use_gpt_latent": True,
-        "meta.stop_mel_token": STOP_MEL_TOKEN,
     }
     request = SimpleNamespace(
         request_id="r-seeded",
@@ -275,7 +264,6 @@ def test_talker2s2mel_full_payload_v25_code_only_does_not_invent_latent():
     cond = _conditioning_tensors()
     payload = {
         "meta.use_gpt_latent": False,
-        "meta.stop_mel_token": STOP_MEL_TOKEN,
         "meta.S_ref": cond["S_ref"],
         "meta.ref_mel": cond["ref_mel"],
         "meta.style": cond["style"],
@@ -298,7 +286,6 @@ def test_talker2s2mel_full_payload_latent_mode_rejects_missing_latent():
     payload = {
         "codes.mel": torch.tensor([[3], [4], [STOP_MEL_TOKEN]]),
         "meta.use_gpt_latent": True,
-        "meta.stop_mel_token": STOP_MEL_TOKEN,
     }
 
     with pytest.raises(ValueError, match="missing hidden_states.latent"):

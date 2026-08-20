@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import os
 import time
 import weakref
@@ -340,35 +339,7 @@ class OmniBase(PDDisaggregationMixin):
             raise ValueError(f"Expected {self.num_stages} sampling params, got a single sampling params object")
         if len(normalized) != self.num_stages:
             raise ValueError(f"Expected {self.num_stages} sampling params, got {len(normalized)}")
-
-        from vllm_omni.entrypoints.openai.stage_params import clone_sampling_params
-
-        merged: list[Any] = []
-        for stage_index, params in enumerate(normalized):
-            cloned = clone_sampling_params(params)
-            if stage_index < len(self.default_sampling_params_list):
-                default = self.default_sampling_params_list[stage_index]
-                default_extra = getattr(default, "extra_args", None) or {}
-                if not default_extra:
-                    merged.append(cloned)
-                    continue
-                user_extra = getattr(cloned, "extra_args", None) or {}
-                combined_extra = copy.deepcopy(default_extra)
-                combined_extra.update(copy.deepcopy(user_extra))
-                internal_runtime = default_extra.get("model_runtime")
-                if internal_runtime is not None:
-                    # ``model_runtime`` is an engine-owned typed contract. A
-                    # request may add unrelated extra args but cannot delete or
-                    # replace checkpoint-bound runtime values.
-                    user_runtime = user_extra.get("model_runtime")
-                    merged_runtime = copy.deepcopy(user_runtime) if isinstance(user_runtime, dict) else {}
-                    for namespace, values in internal_runtime.items():
-                        merged_runtime[namespace] = copy.deepcopy(values)
-                    combined_extra["model_runtime"] = merged_runtime
-                if hasattr(cloned, "extra_args"):
-                    cloned.extra_args = combined_extra
-            merged.append(cloned)
-        return merged
+        return normalized
 
     def _fire_failure_counter_if_alive(self, request_id: str) -> None:
         """Fire the abort/exception bucket of requests_success_total.

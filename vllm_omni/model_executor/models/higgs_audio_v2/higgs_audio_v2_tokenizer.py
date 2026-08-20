@@ -133,7 +133,6 @@ _AUDIO_OUT_TOKEN = "<|AUDIO_OUT|>"
 _AUDIO_OUT_BOS_TOKEN = "<|audio_out_bos|>"
 _AUDIO_EOS_TOKEN = "<|audio_eos|>"
 _AUDIO_DELAY_TOKEN = "<|reserved_special_token_6|>"
-# One-past-codebook ramp markers used only by the delayed RVQ stream layout.
 _AUDIO_STREAM_BOS_ID = 1024
 _AUDIO_STREAM_EOS_ID = 1025
 
@@ -284,7 +283,7 @@ def _encode_ref_audio_codes(
                 "Install via `pip install -U 'transformers>=5.3.0'`."
             ) from exc
 
-    target_sr = int(_ENCODER_CACHE.config.sample_rate)
+    target_sr = int(getattr(_ENCODER_CACHE.config, "sample_rate", 24000))
     wav_t = torch.as_tensor(wav, dtype=torch.float32).reshape(-1)
     if sr and sr != target_sr:
         wav_t = torchaudio.functional.resample(wav_t, sr, target_sr)

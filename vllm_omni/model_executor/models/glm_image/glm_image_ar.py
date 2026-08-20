@@ -96,7 +96,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 logger = init_logger(__name__)
@@ -253,12 +252,8 @@ class GlmImageProcessingInfo(BaseProcessingInfo):
         vision_config = hf_config.vision_config
 
         # Default max size
-        image_size = get_required_config_field(
-            vision_config, "image_size", expected_type=int, model="glm_image"
-        )
-        patch_size = get_required_config_field(
-            vision_config, "patch_size", expected_type=int, model="glm_image"
-        )
+        image_size = getattr(vision_config, "image_size", 2048)
+        patch_size = getattr(vision_config, "patch_size", 16)
 
         max_patches = (image_size // patch_size) ** 2
         return max_patches
@@ -272,9 +267,7 @@ class GlmImageProcessingInfo(BaseProcessingInfo):
         """
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
-        image_size = get_required_config_field(
-            vision_config, "image_size", expected_type=int, model="glm_image"
-        )
+        image_size = getattr(vision_config, "image_size", 2048)
         return (image_size, image_size)
 
 
@@ -333,9 +326,7 @@ class GlmImageDummyInputsBuilder(BaseDummyInputsBuilder[GlmImageProcessingInfo])
         vision_config = hf_config.vision_config
 
         # Use image size from config for maximum features profiling
-        image_size = get_required_config_field(
-            vision_config, "image_size", expected_type=int, model="glm_image"
-        )
+        image_size = getattr(vision_config, "image_size", 2048)
         width = height = image_size
 
         image_overrides = mm_options.get("image") if mm_options else None
@@ -492,9 +483,7 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
 
                 # Get image token ID from config
                 hf_config = self.info.get_hf_config()
-                image_token_id = get_required_config_field(
-                    hf_config, "image_token_id", expected_type=int, model="glm_image"
-                )
+                image_token_id = getattr(hf_config, "image_token_id", 167855)
 
                 # Count image tokens
                 image_token_count = ids_list.count(image_token_id)
@@ -521,9 +510,7 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
             hf_config = self.info.get_hf_config()
 
             # Get image token
-            image_token_id = get_required_config_field(
-                hf_config, "image_token_id", expected_type=int, model="glm_image"
-            )
+            image_token_id = getattr(hf_config, "image_token_id", 167855)
             try:
                 image_token = tokenizer.convert_ids_to_tokens(image_token_id)
             except Exception:
@@ -825,9 +812,7 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
         image_grid_thw = mm_processed_data.get("image_grid_thw")
         mrope_grid_thw = mm_processed_data.get("mrope_image_grid_thw")
         hf_config = self.info.get_hf_config()
-        image_token_id = get_required_config_field(
-            hf_config, "image_token_id", expected_type=int, model="glm_image"
-        )
+        image_token_id = getattr(hf_config, "image_token_id", 167855)
         image_token_count = prompt_ids.count(image_token_id)
         logger.debug(
             "_apply_hf_processor_main i2i(HF): num_images=%s, prompt_len=%s, image_token_count=%s, "
@@ -947,9 +932,7 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
 
         # Get image token ID - this is the token that appears multiple times
         # in the tokenized input after HF processor expansion
-        image_token_id = get_required_config_field(
-            hf_config, "image_token_id", expected_type=int, model="glm_image"
-        )
+        image_token_id = getattr(hf_config, "image_token_id", 167855)
 
         # Debug: log mm_items info
         logger.debug(f"_get_prompt_updates: image_token_id={image_token_id}")
@@ -2020,12 +2003,7 @@ class GlmImageTextDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        max_position_embeddings = get_required_config_field(
-            config,
-            "max_position_embeddings",
-            expected_type=int,
-            model="glm_image",
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
         attention_bias = getattr(config, "attention_bias", True)
 
         self.self_attn = GlmImageTextAttention(

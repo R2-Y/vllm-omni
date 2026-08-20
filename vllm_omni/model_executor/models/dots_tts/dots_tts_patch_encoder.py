@@ -29,7 +29,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.dots_tts.dots_tts_dit import (
     Mlp,
     MultiHeadAttention,
@@ -144,29 +143,16 @@ class TransformerEncoderLayer(nn.Module):
 class SuperviseEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.hidden_size = get_required_config_field(
-            config, "hidden_size", expected_type=int, model="dots_tts"
-        )
+        self.hidden_size = config.get("hidden_size", 1024)
         self.layers = nn.ModuleList(
             [
                 TransformerEncoderLayer(
                     hidden_size=self.hidden_size,
-                    num_heads=get_required_config_field(
-                        config, "num_heads", expected_type=int, model="dots_tts"
-                    ),
-                    ffn_hidden_size=get_required_config_field(
-                        config,
-                        "ffn_hidden_size",
-                        expected_type=int,
-                        model="dots_tts",
-                    ),
+                    num_heads=config.get("num_heads", 16),
+                    ffn_hidden_size=config.get("ffn_hidden_size", 4096),
                     norm_layer=config.get("norm_layer", "LayerNorm"),
                 )
-                for _ in range(
-                    get_required_config_field(
-                        config, "num_layers", expected_type=int, model="dots_tts"
-                    )
-                )
+                for _ in range(config.get("num_layers", 6))
             ]
         )
         self.causal = config.get("causal", False)

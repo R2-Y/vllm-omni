@@ -38,7 +38,6 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.transformers_utils.configs.higgs_audio_v3 import (
     HiggsAudioV3Config,
@@ -123,12 +122,12 @@ class HiggsAudioV3TalkerForConditionalGeneration(nn.Module):
             self.config = hf_config
         else:
             self.config = HiggsAudioV3Config(**hf_config.to_dict())
-        model_config = vllm_config.model_config
+        model_config = getattr(vllm_config, "model_config", None)
         compilation_config = getattr(vllm_config, "compilation_config", None)
         cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
         mode_name = getattr(cudagraph_mode, "name", str(cudagraph_mode)).upper()
         self._use_external_decode_cudagraph = (
-            not bool(model_config.enforce_eager)
+            not bool(getattr(model_config, "enforce_eager", True))
             and cudagraph_mode is not None
             and "NONE" not in mode_name
         )
@@ -204,8 +203,8 @@ class HiggsAudioV3TalkerForConditionalGeneration(nn.Module):
         self._codebook_index_cache: dict[tuple[str, int], torch.Tensor] = {}
         self._boc_frame_cache: dict[tuple[str, int], torch.Tensor] = {}
         self._fast_audio_direct_rows: int = 0
-        scheduler_config = vllm_config.scheduler_config
-        self._mlp_cudagraph_max_batch = max(1, int(scheduler_config.max_num_seqs))
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        self._mlp_cudagraph_max_batch = max(1, int(getattr(scheduler_config, "max_num_seqs", 16)))
         self._postprocess_audio_rows: int = 0
         self._postprocess_audio_active_rows: int = 0
         self._mlp_graphs: dict[tuple[int, int], dict[str, Any]] = {}
@@ -292,23 +291,51 @@ class HiggsAudioV3TalkerForConditionalGeneration(nn.Module):
             )
 
     def _resolve_token_ids(self) -> None:
-        """Resolve tokenizer-owned IDs from the validated checkpoint config."""
+        """Resolve <|audio|> and eos token IDs.
+
+        Prefers config's pre-resolved IDs (from ``resolve_special_tokens()``),
+        falls back to loading the HF tokenizer directly.
+        """
         if self._resolved_tokens:
             return
         self._resolved_tokens = True
 
-        self._audio_continuation_id = get_required_config_field(
-            self.config,
-            "audio_continuation_id",
-            expected_type=int,
-            model="higgs_audio_v3",
-        )
-        self._eos_token_id = get_required_config_field(
-            self.config,
-            "eos_token_id",
-            expected_type=int,
-            model="higgs_audio_v3",
-        )
+        # Try config first (populated by resolve_special_tokens or from_pretrained)
+        cfg_audio = getattr(self.config, "audio_continuation_id", None)
+        cfg_eos = getattr(self.config, "eos_token_id", None)
+        if cfg_audio is not None:
+            self._audio_continuation_id = int(cfg_audio)
+        if cfg_eos is not None:
+            self._eos_token_id = int(cfg_eos)
+
+        if self._audio_continuation_id is not None:
+            logger.info(
+                "Resolved v3 token IDs from config: audio_continuation=%s, eos=%s",
+                self._audio_continuation_id,
+                self._eos_token_id,
+            )
+            return
+
+        # Fallback: load tokenizer directly
+        model_path = getattr(self.vllm_config.model_config, "model", None)
+        if model_path is None:
+            return
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            vocab = dict(tokenizer.get_added_vocab())
+            if "<|audio|>" in vocab:
+                self._audio_continuation_id = vocab["<|audio|>"]
+            if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
+                self._eos_token_id = int(tokenizer.eos_token_id)
+            logger.info(
+                "Resolved v3 token IDs from tokenizer: audio_continuation=%s, eos=%s",
+                self._audio_continuation_id,
+                self._eos_token_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to resolve token IDs from tokenizer: %s", exc)
 
     def update_decode_step_metadata(
         self,
@@ -1518,6 +1545,6 @@ class _BackboneWrapper(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         from vllm.model_executor.models.utils import AutoWeightsLoader
 
-        skip = ["lm_head."] if self.config.tie_word_embeddings else None
+        skip = ["lm_head."] if getattr(self.config, "tie_word_embeddings", False) else None
         loader = AutoWeightsLoader(self, skip_prefixes=skip)
         return loader.load_weights(weights)

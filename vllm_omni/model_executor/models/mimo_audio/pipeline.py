@@ -15,12 +15,12 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
-    replace_stage_sampling_constraints,
 )
-from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import MiMoAudioConfig
-from vllm_omni.model_executor.models.mimo_audio.runtime_config import resolve_mimo_audio_runtime_config
+from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import NO_INTERLEAVE_NEXT_TOKEN_ID
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.mimo_audio"
+_IM_END_TOKEN_ID = 151645
+
 MIMO_AUDIO_PIPELINE = PipelineConfig(
     model_type="mimo_audio",
     default_deploy_config_name="mimo_audio.yaml",
@@ -46,6 +46,7 @@ MIMO_AUDIO_PIPELINE = PipelineConfig(
                 # Stop once the speech/text interleaved span ends. Code2Wav
                 # also treats this token as the audio boundary; without this
                 # the text stream can continue after audio has already ended.
+                "stop_token_ids": [NO_INTERLEAVE_NEXT_TOKEN_ID, _IM_END_TOKEN_ID],
             },
         ),
         StagePipelineConfig(
@@ -61,29 +62,3 @@ MIMO_AUDIO_PIPELINE = PipelineConfig(
         ),
     ),
 )
-
-
-def resolve_mimo_audio_pipeline(hf_config) -> PipelineConfig | None:
-    if hf_config is None:
-        return MIMO_AUDIO_PIPELINE
-    architectures = set(getattr(hf_config, "architectures", ()) or ())
-    if not isinstance(hf_config, MiMoAudioConfig) and not architectures.intersection(
-        MIMO_AUDIO_PIPELINE.hf_architectures
-    ):
-        return MIMO_AUDIO_PIPELINE
-    config = hf_config if isinstance(hf_config, MiMoAudioConfig) else MiMoAudioConfig(**hf_config.to_dict())
-    runtime = resolve_mimo_audio_runtime_config(config)
-    return replace_stage_sampling_constraints(
-        MIMO_AUDIO_PIPELINE,
-        stage_id=0,
-        updates={
-            "stop_token_ids": [
-                runtime.no_interleave_next_token_id,
-                runtime.im_end_token_id,
-            ],
-            "extra_args": runtime.to_sampling_extra_args(),
-        },
-    )
-
-
-resolve_mimo_audio_pipeline.default_pipeline_config = MIMO_AUDIO_PIPELINE

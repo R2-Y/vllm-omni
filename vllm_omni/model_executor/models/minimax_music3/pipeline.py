@@ -25,14 +25,12 @@ from vllm_omni.config.stage_config import (
     StagePipelineConfig,
 )
 
-from .prompt import SPECIAL_TOKEN_IDS
-
 _PROC = "vllm_omni.model_executor.stage_input_processors.minimax_music3"
 
-# Checkpoint/algorithm contract. ``validate_tokenizer_ids`` verifies the
-# tokenizer before prompt construction; the talker and pipeline both consume
-# this one validated token table.
-MINIMAX_MUSIC3_AUDIO_END_TOKEN_ID = SPECIAL_TOKEN_IDS["<|audio_end|>"]
+# ``<|audio_end|>`` in the checkpoint tokenizer (pinned by
+# ``models/minimax_music3/prompt.SPECIAL_TOKEN_IDS``). The talker's own sampler
+# forces this at the frame budget; the stop id is the engine-side safety net.
+MINIMAX_MUSIC3_AUDIO_END_TOKEN_ID = 151670
 
 # MiniMax captions carry the full style description and run to roughly 5000
 # characters, an order of magnitude past the 500-character serving default.

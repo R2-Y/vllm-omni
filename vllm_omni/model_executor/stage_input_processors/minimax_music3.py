@@ -209,15 +209,7 @@ def expand_cfg_prompts(
     token_ids = _prompt_token_ids(prompt)
     companion_prompt: dict[str, Any] | str
     if token_ids is not None:
-        additional_information = prompt.get("additional_information") if isinstance(prompt, dict) else None
-        special_token_ids = (
-            additional_information.get("special_token_ids")
-            if isinstance(additional_information, dict)
-            else None
-        )
-        if not isinstance(special_token_ids, dict):
-            raise ValueError("MiniMax Music 3 prompt is missing tokenizer-owned special_token_ids")
-        null_ids = build_cfg_null_token_ids(token_ids, special_token_ids)
+        null_ids = build_cfg_null_token_ids(token_ids)
         if isinstance(prompt, dict):
             companion_prompt = {**prompt, "prompt_token_ids": null_ids}
             # Drop the text form so the input processor does not re-tokenize

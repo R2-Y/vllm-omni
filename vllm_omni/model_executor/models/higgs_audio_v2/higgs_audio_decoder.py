@@ -21,8 +21,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm_omni.config.stage_config import get_required_config_field
-
 __all__ = [
     "HiggsAudioVQLayer",
     "HiggsAudioRVQ",
@@ -398,12 +396,8 @@ def load_higgs_audio_codec(
 
     state_dict = _load_higgs_audio_state_dict(audio_tokenizer_dir, device)
 
-    codebook_dim = get_required_config_field(
-        tokenizer_config, "codebook_dim", expected_type=int, model="higgs_audio_v2"
-    )
-    codebook_size = get_required_config_field(
-        tokenizer_config, "codebook_size", expected_type=int, model="higgs_audio_v2"
-    )
+    codebook_dim = tokenizer_config.get("codebook_dim", 64)
+    codebook_size = tokenizer_config.get("codebook_size", 1024)
     # Discover hidden_size and num_quantizers from the (possibly remapped) state dict.
     if "quantizer.quantizers.0.project_out.weight" not in state_dict:
         raise KeyError(

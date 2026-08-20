@@ -26,7 +26,6 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.experimental.fullduplex.engine.intermediate import get_tts_handoff
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.platforms import current_omni_platform
@@ -35,8 +34,18 @@ logger = init_logger(__name__)
 
 _REPETITION_WINDOW = 16
 _REPETITION_PENALTY_CHUNK_SIZE = 16
+_MIN_AUDIO_TOKENS = 64
+_MAX_AUDIO_TOKENS = 2048
+_AUDIO_TOKENS_PER_TEXT_TOKEN = 10
 # Codec-token sampling happens inside the model; vLLM sampling parameters
 # only choose the Talker's binary continue/stop row.
+_CODEC_SEED = 42
+_CODEC_TEMPERATURE = 0.8
+_CODEC_TOP_K = 25
+_CODEC_TOP_P = 0.85
+_CODEC_REPETITION_PENALTY = 1.05
+_CODEC_MIN_TOKENS = 50
+_DUPLEX_CODEC_TOKENS_PER_CHUNK = 26
 
 
 @dataclass(slots=True)
@@ -50,13 +59,7 @@ class _PendingCodecSample:
     info: dict[str, Any]
 
 
-def _max_audio_tokens(
-    condition_tokens: int,
-    *,
-    min_audio_tokens: int,
-    max_audio_tokens: int,
-    audio_tokens_per_text_token: int,
-) -> int:
+def _max_audio_tokens(condition_tokens: int) -> int:
     """Bound codec generation with a conservative text-length estimate.
 
     EOS is masked for the first 50 steps, so a direct ``text_tokens * 10``
@@ -65,8 +68,8 @@ def _max_audio_tokens(
     sequence within the Talker's 4096-position context.
     """
     return max(
-        min_audio_tokens,
-        min(max_audio_tokens, condition_tokens * audio_tokens_per_text_token),
+        _MIN_AUDIO_TOKENS,
+        min(_MAX_AUDIO_TOKENS, condition_tokens * _AUDIO_TOKENS_PER_TEXT_TOKEN),
     )
 
 
@@ -180,47 +183,17 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             tts_config = config
         if tts_config is not None:
             self._tts_config = tts_config
-            self._tts_bos_id = get_required_config_field(
-                tts_config,
-                "audio_bos_token_id",
-                expected_type=int,
-                model="minicpmo_4_5",
-            )
-            self._text_eos_id = get_required_config_field(
-                tts_config,
-                "text_eos_token_id",
-                expected_type=int,
-                model="minicpmo_4_5",
-            )
-            self._num_audio_tokens = get_required_config_field(
-                tts_config,
-                "num_audio_tokens",
-                expected_type=int,
-                model="minicpmo_4_5",
-            )
-            self._hidden_size = get_required_config_field(
-                tts_config,
-                "hidden_size",
-                expected_type=int,
-                model="minicpmo_4_5",
-            )
+            self._tts_bos_id = getattr(tts_config, "audio_bos_token_id", 151687)
+            self._text_eos_id = getattr(tts_config, "text_eos_token_id", 151692)
+            self._num_audio_tokens = getattr(tts_config, "num_audio_tokens", 6562)
+            self._hidden_size = getattr(tts_config, "hidden_size", 768)
             self._normalize = getattr(tts_config, "normalize_projected_hidden", True)
-            required_int = lambda field: get_required_config_field(  # noqa: E731
-                tts_config, field, expected_type=int, model="minicpmo_4_5"
-            )
-            required_float = lambda field: get_required_config_field(  # noqa: E731
-                tts_config, field, expected_type=float, model="minicpmo_4_5"
-            )
-            self._codec_seed = required_int("seed")
-            self._codec_temperature = required_float("temperature")
-            self._codec_top_k = required_int("top_k")
-            self._codec_top_p = required_float("top_p")
-            self._codec_repetition_penalty = required_float("repetition_penalty")
-            self._codec_min_tokens = required_int("min_new_tokens")
-            self._max_audio_tokens = required_int("max_new_tokens")
-            self._min_audio_tokens = required_int("min_audio_tokens")
-            self._audio_tokens_per_text_token = required_int("audio_tokens_per_text_token")
-            self._duplex_codec_tokens_per_chunk = required_int("duplex_codec_tokens_per_chunk")
+            self._codec_seed = int(getattr(tts_config, "seed", _CODEC_SEED))
+            self._codec_temperature = float(getattr(tts_config, "temperature", _CODEC_TEMPERATURE))
+            self._codec_top_k = int(getattr(tts_config, "top_k", _CODEC_TOP_K))
+            self._codec_top_p = float(getattr(tts_config, "top_p", _CODEC_TOP_P))
+            self._codec_repetition_penalty = float(getattr(tts_config, "repetition_penalty", _CODEC_REPETITION_PENALTY))
+            self._codec_min_tokens = int(getattr(tts_config, "min_new_tokens", _CODEC_MIN_TOKENS))
         else:
             self._tts_config = None
 
@@ -236,24 +209,13 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         if self._tts_config is None:
             raise ValueError("MiniCPM-o continuous Talker requires tts_config")
         cfg = self._tts_config
-        num_vq = get_required_config_field(
-            cfg,
-            "num_vq",
-            expected_type=int,
-            model="minicpmo_4_5",
-        )
-        if num_vq != 1:
+        if int(getattr(cfg, "num_vq", 1)) != 1:
             raise ValueError(
                 "MiniCPM-o continuous Talker currently requires num_vq=1; "
-                f"checkpoint reports {num_vq}"
+                f"checkpoint reports {getattr(cfg, 'num_vq', None)}"
             )
         llama_config = LlamaConfig(
-            vocab_size=get_required_config_field(
-                cfg,
-                "num_text_tokens",
-                expected_type=int,
-                model="minicpmo_4_5",
-            ),
+            vocab_size=32000,
             hidden_size=int(cfg.hidden_size),
             intermediate_size=int(cfg.intermediate_size),
             num_hidden_layers=int(cfg.num_hidden_layers),
@@ -261,12 +223,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             num_key_value_heads=int(cfg.num_key_value_heads),
             hidden_act=getattr(cfg, "hidden_act", "silu"),
             max_position_embeddings=int(cfg.max_position_embeddings),
-            rms_norm_eps=get_required_config_field(
-                cfg,
-                "rms_norm_eps",
-                expected_type=float,
-                model="minicpmo_4_5",
-            ),
+            rms_norm_eps=float(getattr(cfg, "rms_norm_eps", 1e-6)),
             tie_word_embeddings=False,
         )
         talker_config = self.vllm_config.with_hf_config(llama_config, architectures=["LlamaForCausalLM"])
@@ -403,15 +360,10 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
                 bool(meta.get("turn_start", False)) or bool(meta.get("turn_end", False))
             )
             if native_duplex:
-                max_tokens = self._duplex_codec_tokens_per_chunk
-                min_tokens = 0 if duplex_boundary else self._duplex_codec_tokens_per_chunk
+                max_tokens = _DUPLEX_CODEC_TOKENS_PER_CHUNK
+                min_tokens = 0 if duplex_boundary else _DUPLEX_CODEC_TOKENS_PER_CHUNK
             else:
-                max_tokens = _max_audio_tokens(
-                    int(token_ids.numel()),
-                    min_audio_tokens=self._min_audio_tokens,
-                    max_audio_tokens=self._max_audio_tokens,
-                    audio_tokens_per_text_token=self._audio_tokens_per_text_token,
-                )
+                max_tokens = _max_audio_tokens(int(token_ids.numel()))
                 min_tokens = self._codec_min_tokens
             state = {
                 "step": 0,

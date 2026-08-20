@@ -84,9 +84,6 @@ class StagePoolLLMClient(StagePoolClient, Protocol):
         source_outputs: list[Any],
         prompt: Any = None,
         streaming_context: Any | None = None,
-        sampling_params: Any | None = None,
-        source_sampling_params: Any | None = None,
-        target_sampling_params: Any | None = None,
     ) -> list[OmniTokensPrompt]: ...
 
     def get_kv_sender_info(

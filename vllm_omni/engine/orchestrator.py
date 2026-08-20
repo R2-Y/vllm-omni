@@ -51,9 +51,6 @@ from vllm_omni.engine.messages import (
 )
 from vllm_omni.engine.orchestrator_monitor import create_orch_monitor, replica_key
 from vllm_omni.engine.serialization import serialize_additional_information
-from vllm_omni.engine.stage_input_processor_adapter import (
-    invoke_stage_input_processor,
-)
 from vllm_omni.engine.stage_pool import StagePool, StageUnavailableError
 from vllm_omni.errors import DEFAULT_CLIENT_ERROR_TYPE
 from vllm_omni.metrics.prometheus import OmniRequestCounter
@@ -1952,17 +1949,21 @@ class Orchestrator:
             diffusion_source_outputs = [output, *companion_outputs]
             if next_client.custom_process_input_func is not None:
                 _t_ar2d = _time.perf_counter()
-                diffusion_prompt = invoke_stage_input_processor(
-                    next_client.custom_process_input_func,
+                _fn = next_client.custom_process_input_func
+                _extra_kwargs: dict[str, Any] = {}
+                # TODO: replace signature probe with explicit kwarg contract.
+                try:
+                    import inspect as _inspect
+
+                    if "sampling_params" in _inspect.signature(_fn).parameters:
+                        _extra_kwargs["sampling_params"] = params
+                except (TypeError, ValueError):
+                    pass
+                diffusion_prompt = _fn(
                     diffusion_source_outputs,
                     req_state.prompt,
                     requires_multimodal_data,
-                    streaming_context=req_state.streaming,
-                    sampling_params=params,
-                    source_sampling_params=req_state.sampling_params_list[
-                        src_stage_id
-                    ],
-                    target_sampling_params=params,
+                    **_extra_kwargs,
                 )
                 _dt_ar2d = (_time.perf_counter() - _t_ar2d) * 1000
                 req_state.pipeline_timings["ar2diffusion_ms"] = _dt_ar2d
@@ -2134,9 +2135,6 @@ class Orchestrator:
                 source_outputs,
                 req_state.prompt,
                 streaming_context=req_state.streaming,
-                sampling_params=params,
-                source_sampling_params=req_state.sampling_params_list[src_stage_id],
-                target_sampling_params=params,
             )
         except Exception:
             logger.exception(

@@ -11,17 +11,20 @@ Users pass the HF repo ROOT (its manifest config.json carries
 files, so stage 1's tokenizer also points at the thinker checkpoint.
 """
 
-from transformers import AutoTokenizer
-
 from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
-    get_required_config_field,
-    replace_stage_sampling_constraints,
 )
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.audex"
+
+# <speechgen_end> token id in checkpoint_folder_audiogen's tokenizer; pinned
+# by a unit test against the real tokenizer fixture.
+AUDEX_SPEECHGEN_END_TOKEN_ID = 131076
+
+# <audiogen_end> stops TTA generation (pinned in tests via models/audex/tta.py).
+AUDEX_AUDIOGEN_END_TOKEN_ID = 131074
 
 # No pipeline-level model_arch: stage-0 classes resolve from each
 # checkpoint's own ``architectures`` (dense on the 2B, NemotronH on the
@@ -47,6 +50,7 @@ AUDEX_TTS_PIPELINE = PipelineConfig(
             custom_process_next_stage_input_func=f"{_PROC}.thinker2code2wav_full_payload",
             sampling_constraints={
                 "detokenize": False,
+                "stop_token_ids": [AUDEX_SPEECHGEN_END_TOKEN_ID],
             },
         ),
         StagePipelineConfig(
@@ -102,6 +106,7 @@ AUDEX_S2S_PIPELINE = PipelineConfig(
             # text-final passes.
             sampling_constraints={
                 "detokenize": True,
+                "stop_token_ids": [AUDEX_SPEECHGEN_END_TOKEN_ID],
             },
         ),
         StagePipelineConfig(
@@ -169,6 +174,7 @@ AUDEX_TTA_PIPELINE = PipelineConfig(
             custom_process_next_stage_input_func=f"{_PROC}.thinker2xcodec_full_payload",
             sampling_constraints={
                 "detokenize": False,
+                "stop_token_ids": [AUDEX_AUDIOGEN_END_TOKEN_ID],
             },
         ),
         StagePipelineConfig(
@@ -187,53 +193,3 @@ AUDEX_TTA_PIPELINE = PipelineConfig(
         ),
     ),
 )
-
-
-def _resolve_audex_stop_pipeline(
-    pipeline: PipelineConfig,
-    hf_config,
-    *,
-    token: str,
-) -> PipelineConfig | None:
-    if hf_config is None:
-        return pipeline
-    model_type = getattr(hf_config, "model_type", None)
-    architectures = set(getattr(hf_config, "architectures", ()) or ())
-    if model_type != "nemotron_labs_audex" and not any("Audex" in str(arch) for arch in architectures):
-        return pipeline
-    model_path = get_required_config_field(
-        hf_config,
-        "_name_or_path",
-        expected_type=str,
-        model=pipeline.model_type,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        subfolder="checkpoint_folder_audiogen",
-        trust_remote_code=True,
-    )
-    token_id = tokenizer.convert_tokens_to_ids(token)
-    if not isinstance(token_id, int) or token_id < 0 or token_id == tokenizer.unk_token_id:
-        raise ValueError(f"{pipeline.model_type} tokenizer does not define required stop token {token!r}")
-    return replace_stage_sampling_constraints(
-        pipeline,
-        stage_id=0,
-        updates={"stop_token_ids": [token_id]},
-    )
-
-
-def resolve_audex_tts_pipeline(hf_config) -> PipelineConfig | None:
-    return _resolve_audex_stop_pipeline(AUDEX_TTS_PIPELINE, hf_config, token="<speechgen_end>")
-
-
-def resolve_audex_s2s_pipeline(hf_config) -> PipelineConfig | None:
-    return _resolve_audex_stop_pipeline(AUDEX_S2S_PIPELINE, hf_config, token="<speechgen_end>")
-
-
-def resolve_audex_tta_pipeline(hf_config) -> PipelineConfig | None:
-    return _resolve_audex_stop_pipeline(AUDEX_TTA_PIPELINE, hf_config, token="<audiogen_end>")
-
-
-resolve_audex_tts_pipeline.default_pipeline_config = AUDEX_TTS_PIPELINE
-resolve_audex_s2s_pipeline.default_pipeline_config = AUDEX_S2S_PIPELINE
-resolve_audex_tta_pipeline.default_pipeline_config = AUDEX_TTA_PIPELINE

@@ -26,10 +26,12 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
+
+# Max tokens per audio: Whisper 30s → 3000 mel frames → encoder 2x + adapter 8x = 16x → 188
+MAX_AUDIO_TOKENS = 188
 
 
 def _calc_audio_num_tokens(num_samples: int, sample_rate: int) -> int:
@@ -55,36 +57,19 @@ class CovoAudioProcessingInfo(BaseProcessingInfo):
     def get_feature_extractor(self, **kwargs):
         return WhisperFeatureExtractor(
             feature_size=128,
-            sampling_rate=get_required_config_field(
-                self.get_hf_config(),
-                "audio_sample_rate",
-                expected_type=int,
-                model="covo_audio",
-            ),
+            sampling_rate=16000,
         )
 
     def get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(
-            target_sr=get_required_config_field(
-                self.get_hf_config(),
-                "audio_sample_rate",
-                expected_type=int,
-                model="covo_audio",
-            ),
+            target_sr=16000,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
     def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
-        return {
-            "audio": get_required_config_field(
-                self.get_hf_config(),
-                "max_audio_tokens",
-                expected_type=int,
-                model="covo_audio",
-            )
-        }
+        return {"audio": MAX_AUDIO_TOKENS}
 
 
 class CovoAudioDummyInputsBuilder(BaseDummyInputsBuilder[CovoAudioProcessingInfo]):
@@ -103,20 +88,8 @@ class CovoAudioDummyInputsBuilder(BaseDummyInputsBuilder[CovoAudioProcessingInfo
             return {}
         # 30s at 16kHz = Whisper's max input length, ensures profile_run
         # allocates memory for the worst-case MAX_AUDIO_TOKENS (188) tokens.
-        sample_rate = get_required_config_field(
-            self.info.get_hf_config(),
-            "audio_sample_rate",
-            expected_type=int,
-            model="covo_audio",
-        )
-        max_audio_seconds = get_required_config_field(
-            self.info.get_hf_config(),
-            "max_audio_seconds",
-            expected_type=int,
-            model="covo_audio",
-        )
-        dummy_audio = np.zeros((sample_rate * max_audio_seconds,), dtype=np.float32)
-        return {"audio": [(dummy_audio, sample_rate)] * num_audios}
+        dummy_audio = np.zeros((16000 * 30,), dtype=np.float32)
+        return {"audio": [(dummy_audio, 16000)] * num_audios}
 
     def get_dummy_processor_inputs(
         self,
@@ -154,23 +127,19 @@ class CovoAudioMultiModalProcessor(BaseMultiModalProcessor[CovoAudioProcessingIn
 
         raw_audios = []
         num_tokens_list = []
-        sampling_rate = get_required_config_field(
-            self.info.get_hf_config(),
-            "audio_sample_rate",
-            expected_type=int,
-            model="covo_audio",
-        )
         for item in audios:
             if isinstance(item, tuple):
                 audio_array, _sr = item
             else:
                 audio_array = item
             raw_audios.append(audio_array)
-            num_tokens_list.append(_calc_audio_num_tokens(len(audio_array), sampling_rate))
+            # MultiModalDataParser resamples to target_sr=16000, so always
+            # compute token count at 16 kHz regardless of the original sr.
+            num_tokens_list.append(_calc_audio_num_tokens(len(audio_array), 16000))
 
         features = feature_extractor(
             raw_audios,
-            sampling_rate=sampling_rate,
+            sampling_rate=16000,
             return_tensors="pt",
         )
 
@@ -210,12 +179,7 @@ class CovoAudioMultiModalProcessor(BaseMultiModalProcessor[CovoAudioProcessingIn
             if num_tokens_tensor is not None:
                 num_tokens = int(num_tokens_tensor[item_idx])
             else:
-                num_tokens = get_required_config_field(
-                    self.info.get_hf_config(),
-                    "max_audio_tokens",
-                    expected_type=int,
-                    model="covo_audio",
-                )
+                num_tokens = MAX_AUDIO_TOKENS
             return PromptUpdateDetails.select_token_id(
                 [audio_token_id] * num_tokens,
                 embed_token_id=audio_token_id,

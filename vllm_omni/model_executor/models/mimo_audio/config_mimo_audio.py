@@ -4,9 +4,12 @@ from dataclasses import dataclass
 
 from transformers import PretrainedConfig, Qwen2Config
 
+SPAN_CODEC_START_TOKEN_ID = 151670
+SPAN_CODEC_END_TOKEN_ID = 151672
+TALKER_CODEC_PAD_TOKEN_ID = 151667
 TEXT_GROUP_SIZE = 5
-# Interleaving protocol width, not a tokenizer/checkpoint token ID.
 PAD_GROUP_SIZE = 5
+NO_INTERLEAVE_NEXT_TOKEN_ID = 151671
 
 
 @dataclass
@@ -25,20 +28,9 @@ class MiMoAudioConfig(Qwen2Config):
         local_attn_heads: int = 64,
         local_ffn_dim: int = 4096,
         local_attn_dropout: float = 0.1,
-        audio_sample_rate: int = 24000,
         input_local_layers: int = 6,
         input_local_dim: int | None = None,
         input_full_attention: bool | None = None,
-        empty_token_id: int = 151667,
-        span_codec_start_token_id: int = 151670,
-        span_codec_end_token_id: int = 151672,
-        no_interleave_next_token_id: int = 151671,
-        speech_start_token_id: int = 151665,
-        speech_end_token_id: int = 151666,
-        endoftext_token_id: int = 151643,
-        im_end_token_id: int = 151645,
-        max_code2wav_tokens: int = 18192,
-        vocoder_attn_window_size: list[int] | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -58,24 +50,11 @@ class MiMoAudioConfig(Qwen2Config):
         self.local_attn_heads = local_attn_heads
         self.local_ffn_dim = local_ffn_dim
         self.local_attn_dropout = local_attn_dropout
-        self.audio_sample_rate = audio_sample_rate
 
         self.input_local_layers = input_local_layers
         self.input_local_dim = input_local_dim or local_dim
 
         self.input_full_attention = input_full_attention
-        self.empty_token_id = empty_token_id
-        self.span_codec_start_token_id = span_codec_start_token_id
-        self.span_codec_end_token_id = span_codec_end_token_id
-        self.no_interleave_next_token_id = no_interleave_next_token_id
-        self.speech_start_token_id = speech_start_token_id
-        self.speech_end_token_id = speech_end_token_id
-        self.endoftext_token_id = endoftext_token_id
-        self.im_end_token_id = im_end_token_id
-        self.max_code2wav_tokens = max_code2wav_tokens
-        self.vocoder_attn_window_size = (
-            list(vocoder_attn_window_size) if vocoder_attn_window_size is not None else [40, 10]
-        )
 
     def _parse_maybe_list(self, value: str | int, length: int) -> list[int]:
         if isinstance(value, str) and "-" in value:
@@ -90,19 +69,6 @@ class MiMoAudioConfig(Qwen2Config):
 
     def parsed_delay_pattern(self):
         return self._parse_maybe_list(self.delay_pattern, self.audio_channels)
-
-    def parsed_vocoder_attn_window_size(self) -> tuple[int, int]:
-        value = self.vocoder_attn_window_size
-        if (
-            not isinstance(value, list)
-            or len(value) != 2
-            or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in value)
-        ):
-            raise ValueError(
-                "MiMo Audio config requires vocoder_attn_window_size to contain two positive integers; "
-                f"got {value!r}"
-            )
-        return value[0], value[1]
 
     def local_config(self):
         config = copy.deepcopy(self)

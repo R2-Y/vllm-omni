@@ -554,13 +554,13 @@ class MossAudioTokenizerModel(PreTrainedModel):
         super().__init__(config)
         self.sampling_rate = config.sampling_rate
         self.downsample_rate = config.downsample_rate
-        if config.number_channels is None or config.enable_channel_interleave is None:
-            raise ValueError(
-                "MOSS Audio Tokenizer requires number_channels and "
-                "enable_channel_interleave in checkpoint config"
-            )
-        self.number_channels = config.number_channels
-        self.enable_channel_interleave = config.enable_channel_interleave
+        # Real v1 checkpoints store these as an explicit JSON `null` rather
+        # than omitting the key, so `getattr(..., default)` doesn't apply —
+        # normalize None to the same defaults here.
+        self.number_channels = getattr(config, "number_channels", 1) or 1
+        self.enable_channel_interleave = getattr(config, "enable_channel_interleave", True)
+        if self.enable_channel_interleave is None:
+            self.enable_channel_interleave = True
 
         ctx = config.causal_transformer_context_duration
         channel_interleave_factor = (

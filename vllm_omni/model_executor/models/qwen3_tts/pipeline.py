@@ -12,9 +12,9 @@ from vllm_omni.config.stage_config import (
     pipeline_cfg_resolver,
     replace_stage_sampling_constraints,
 )
+from vllm_omni.model_executor.config_contract import get_required_config_field
 
 from .configuration_qwen3_tts import Qwen3TTSConfig
-from .runtime_config import resolve_qwen3_tts_runtime_config
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.qwen3_tts"
 
@@ -35,6 +35,7 @@ QWEN3_TTS_PIPELINE = PipelineConfig(
             custom_process_next_stage_input_func=f"{_PROC}.talker2code2wav_full_payload",
             sampling_constraints={
                 "detokenize": False,
+                "stop_token_ids": [2150],
             },
         ),
         StagePipelineConfig(
@@ -61,31 +62,19 @@ QWEN3_TTS_PIPELINE = PipelineConfig(
 )
 
 
-def apply_qwen3_tts_sampling_constraints(
-    pipeline: PipelineConfig,
-    hf_config: Qwen3TTSConfig,
-    *,
-    stage_id: int,
-) -> PipelineConfig:
-    """Apply the Qwen3-TTS Talker's checkpoint-owned sampling contract."""
-    runtime = resolve_qwen3_tts_runtime_config(hf_config)
-    return replace_stage_sampling_constraints(
-        pipeline,
-        stage_id=stage_id,
-        updates={
-            "stop_token_ids": [runtime.codec_stop_token_id],
-            "extra_args": runtime.to_sampling_extra_args(),
-        },
-    )
-
-
 @pipeline_cfg_resolver(
     config_type=Qwen3TTSConfig,
     default_pipeline_config=QWEN3_TTS_PIPELINE,
 )
 def resolve_qwen3_tts_pipeline(hf_config: Qwen3TTSConfig) -> PipelineConfig:
-    return apply_qwen3_tts_sampling_constraints(
-        QWEN3_TTS_PIPELINE,
+    stop_token_id = get_required_config_field(
         hf_config,
+        "talker_config.codec_eos_token_id",
+        expected_type=int,
+        model="qwen3_tts",
+    )
+    return replace_stage_sampling_constraints(
+        QWEN3_TTS_PIPELINE,
         stage_id=0,
+        updates={"stop_token_ids": [stop_token_id]},
     )

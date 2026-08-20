@@ -23,10 +23,18 @@ DEFAULT_AURA_SYSTEM_PROMPT = (
 )
 
 SILENT_TEXT = "<|silent|>"
-# Qwen chat templates encode an assistant role prefix in three tokens. This is
-# a wire-layout constant, not a token identity; the actual ids come from the
-# source tokenizer output.
-_ASSISTANT_ROLE_PREFIX_LENGTH = 3
+QWEN_IM_START_ID = 151644
+QWEN_IM_END_ID = 151645
+QWEN_ASSISTANT_ID = 77091
+QWEN_NEWLINE_ID = 198
+QWEN_ASSISTANT_PREFIX_IDS = [QWEN_IM_START_ID, QWEN_ASSISTANT_ID, QWEN_NEWLINE_ID]
+QWEN_ASSISTANT_SUFFIX_IDS = [
+    QWEN_IM_END_ID,
+    QWEN_NEWLINE_ID,
+    QWEN_IM_START_ID,
+    QWEN_ASSISTANT_ID,
+    QWEN_NEWLINE_ID,
+]
 DEFAULT_QWEN3_TTS_REF_AUDIO = "vllm-omni/tests/assets/qwen3_tts/clone_2.wav"
 DEFAULT_QWEN3_TTS_REF_TEXT = (
     "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you."
@@ -109,14 +117,22 @@ def _extract_token_ids(source_output: Any) -> list[int]:
     return []
 
 
+def _trim_aura_response_token_ids(token_ids: list[int]) -> list[int]:
+    ids = list(token_ids)
+    if ids[: len(QWEN_ASSISTANT_PREFIX_IDS)] == QWEN_ASSISTANT_PREFIX_IDS:
+        ids = ids[len(QWEN_ASSISTANT_PREFIX_IDS) :]
+    if QWEN_IM_END_ID in ids:
+        ids = ids[: ids.index(QWEN_IM_END_ID)]
+    while ids and ids[-1] in {QWEN_IM_START_ID, QWEN_IM_END_ID, QWEN_NEWLINE_ID}:
+        ids.pop()
+    return ids
+
+
 def _qwen3_tts_assistant_token_ids_from_aura(source_output: Any) -> list[int]:
-    token_ids = _extract_token_ids(source_output)
-    if len(token_ids) < _ASSISTANT_ROLE_PREFIX_LENGTH:
+    content_ids = _trim_aura_response_token_ids(_extract_token_ids(source_output))
+    if not content_ids:
         return []
-    # AURA's tokenizer already produced the checkpoint-owned role/control ids.
-    # Qwen3-TTS needs the completed assistant turn followed by the same role
-    # prefix to begin its continuation; preserve and reuse those observed ids.
-    return token_ids + token_ids[:_ASSISTANT_ROLE_PREFIX_LENGTH]
+    return QWEN_ASSISTANT_PREFIX_IDS + content_ids + QWEN_ASSISTANT_SUFFIX_IDS
 
 
 def _source_prompt_by_request_id(source_outputs: list[Any], prompt: Any) -> dict[str, dict[str, Any]]:

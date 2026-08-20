@@ -40,11 +40,12 @@ from vllm_omni.model_executor.models.qwen2_5_omni.qwen2_5_omni_thinker import (
     Qwen2_5OmniThinkerMultiModalProcessor,
     Qwen2_5OmniThinkerProcessingInfo,
 )
-from vllm_omni.model_executor.models.qwen2_5_omni.runtime_config import (
-    resolve_qwen2_5_omni_runtime_config,
-)
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights, split_list_into_ranges
 from vllm_omni.platforms import current_omni_platform
+
+TALKER_CODEC_EOS_TOKEN_ID = 8294
+TALKER_CODEC_BOS_TOKEN_ID = 8293
+
 
 logger = init_logger(__name__)
 
@@ -62,7 +63,6 @@ class Qwen2_5OmniForConditionalGeneration(
         self.has_preprocess = False
         self.have_multimodal_outputs = True
         config: Qwen2_5OmniConfig = vllm_config.model_config.hf_config
-        self.runtime_config = resolve_qwen2_5_omni_runtime_config(config)
         multimodal_config = vllm_config.model_config.multimodal_config
         # keep vllm_config for later submodule init
         self.vllm_config = vllm_config
@@ -355,9 +355,7 @@ class Qwen2_5OmniForConditionalGeneration(
             if sampling_metadata is not None:
                 # the padding token id is set to text model's pad token id,
                 # which do not match with the talker model's word embedding size
-                sampling_metadata.prompt_token_ids[
-                    sampling_metadata.prompt_token_ids == self.thinker_config.text_config.vocab_size
-                ] = self.talker_config.vocab_size
+                sampling_metadata.prompt_token_ids[sampling_metadata.prompt_token_ids == 152064] = 8448
 
             return OmniOutput(
                 text_hidden_states=talker_hidden,
@@ -375,9 +373,9 @@ class Qwen2_5OmniForConditionalGeneration(
                 )
             )
 
-            if code.numel() and code[-1] == self.runtime_config.codec_stop_token_id:
+            if code.numel() and code[-1] == TALKER_CODEC_EOS_TOKEN_ID:
                 code = code[:-1]
-            if code.numel() and code[0] == self.runtime_config.codec_start_token_id:
+            if code.numel() and code[0] == TALKER_CODEC_BOS_TOKEN_ID:
                 code = code[1:]
 
             audio_tensor = self.generate_audio(code, voice_type) if code.numel() else torch.zeros(0, device=code.device)
@@ -392,12 +390,7 @@ class Qwen2_5OmniForConditionalGeneration(
                     ).to(self._module_device(self.model)),
                     self.talker.thinker_to_talker_proj(
                         self.talker.embed_input_ids(
-                            torch.tensor(
-                                [
-                                    self.runtime_config.codec_start_token_id,
-                                    self.runtime_config.codec_stop_token_id,
-                                ]
-                            )
+                            torch.tensor([TALKER_CODEC_BOS_TOKEN_ID, TALKER_CODEC_EOS_TOKEN_ID])
                             .to(torch.bfloat16)
                             .to(self._module_device(self.model))
                         )
@@ -451,7 +444,7 @@ class Qwen2_5OmniForConditionalGeneration(
         vision_end_token_id = thinker_config.vision_end_token_id
         seconds_per_chunk = thinker_config.seconds_per_chunk
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size
-        tokens_per_second = thinker_config.vision_config.tokens_per_second
+        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second", 25)
 
         if isinstance(image_grid_thw, list):
             image_grid_thw = torch.tensor(image_grid_thw)
@@ -598,8 +591,17 @@ class Qwen2_5OmniForConditionalGeneration(
         # talker embeddings
         self.talker_embedding = self._load_talker_embedding()
 
-        self.tts_text_spk_token_ids = dict(self.runtime_config.speaker_token_ids)
-        self.default_tts_text_spk_type = self.runtime_config.default_speaker
+        # embed_text_bos_token
+        self.tts_text_spk_token_ids = {
+            # M02: Male voice with standard Mandarin and a slight northern accent
+            "m02": 151870,
+            "Ethan": 151870,
+            # F030: Your anime-styled virtual girlfriend
+            "f030": 151872,
+            "Chelsie": 151872,
+        }
+        self.default_tts_text_spk_type = list(self.tts_text_spk_token_ids.keys())[0]
+        self.tts_text_spk_token_ids["prefix_caching"] = 151870
 
         talker_hf_config = self.talker_config
         if hasattr(talker_hf_config, "talker_config"):
@@ -660,14 +662,18 @@ class Qwen2_5OmniForConditionalGeneration(
         return set(["thinker_embedding.weight", "talker_embedding.weight"])
 
     def _get_embed_text_spk_token(self, voice_type: str):
-        if not hasattr(self, "embed_text_spk_tokens"):
+        if not hasattr(self, "embed_text_spk_tokens") or voice_type not in self.embed_text_spk_tokens:
             return self.embed_text_bos_token
-        speaker = voice_type if voice_type in self.embed_text_spk_tokens else self.default_tts_text_spk_type
-        return self.embed_text_spk_tokens[speaker]
+        return self.embed_text_spk_tokens[voice_type]
 
     def _get_text_spk_token_id(self, voice_type: str):
-        speaker = voice_type if voice_type in self.tts_text_spk_token_ids else self.default_tts_text_spk_type
-        return self.tts_text_spk_token_ids[speaker]
+        talker_hf_config = self.talker_config
+        if hasattr(talker_hf_config, "talker_config"):
+            talker_hf_config = talker_hf_config.talker_config
+
+        if voice_type not in self.tts_text_spk_token_ids:
+            return talker_hf_config.tts_text_start_token_id
+        return self.tts_text_spk_token_ids[voice_type]
 
     def talker_preprocess(
         self,

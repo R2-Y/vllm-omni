@@ -533,13 +533,7 @@ class TestEndpointRestrictionsTrustRemoteCode:
 
         def fake_get_config(model, trust_remote_code, **_):
             trust_remote_code |= False  # TypeError if None reaches here
-            config = Qwen3OmniMoeConfig(enable_audio_output=True)
-            config.talker_config.codec_eos_token_id = 2150
-            config.talker_config.speaker_id = {"custom": 2301}
-            config.thinker_config.audio_token_id = 151675
-            config.thinker_config.image_token_id = 151655
-            config.thinker_config.video_token_id = 151656
-            return config
+            return Qwen3OmniMoeConfig(enable_audio_output=True)
 
         mocker.patch("vllm_omni.config.config_factory.get_config", side_effect=fake_get_config)
 

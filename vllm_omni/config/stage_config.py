@@ -4,11 +4,10 @@
 
 from __future__ import annotations
 
-import copy
 import functools
 import re
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
@@ -22,9 +21,6 @@ from vllm_omni.config.endpoint_policy import EndpointRestriction
 from vllm_omni.config.yaml_util import create_config, load_yaml_config, to_dict
 from vllm_omni.core.sched.omni_ar_scheduler import OmniARAsyncScheduler, OmniARScheduler
 from vllm_omni.core.sched.omni_generation_scheduler import OmniGenerationScheduler
-from vllm_omni.model_executor.config_contract import (
-    get_required_config_field as get_required_config_field,
-)
 
 logger = init_logger(__name__)
 
@@ -37,23 +33,18 @@ def pipeline_cfg_resolver(
     config_type: type[PretrainedConfig],
     default_pipeline_config: PipelineConfig | None = None,
 ):
-    """Bind strict config resolution to one type while preserving topology.
-
-    Registry callers historically resolve a pipeline by key alone. Returning
-    the frozen default topology for absent or unrelated configs keeps that
-    contract, while strict checkpoint reads only run after a type match.
-    """
+    """Wraps a resolver such that we return None if a hf_config of the wrong type is provided."""
 
     def resolver_builder(func):
         @functools.wraps(func)
         def wrapper(hf_config: PretrainedConfig | None):
             if hf_config is None or not isinstance(hf_config, config_type):
-                return default_pipeline_config
+                return None
             return func(hf_config)
 
+        wrapper.config_type = config_type
         if default_pipeline_config is not None:
             wrapper.default_pipeline_config = default_pipeline_config
-        wrapper.config_type = config_type
         return wrapper
 
     return resolver_builder
@@ -295,29 +286,20 @@ def replace_stage_sampling_constraints(
     pipeline: PipelineConfig,
     *,
     stage_id: int,
-    updates: Mapping[str, Any],
+    updates: dict[str, Any],
 ) -> PipelineConfig:
-    """Return a frozen pipeline copy with merged constraints for one stage."""
-    replacement_found = False
-    stages: list[StagePipelineConfig] = []
-    for stage in pipeline.stages:
-        if stage.stage_id != stage_id:
-            stages.append(stage)
-            continue
-        replacement_found = True
-        stages.append(
-            replace(
-                stage,
-                sampling_constraints={
-                    **stage.sampling_constraints,
-                    **updates,
-                },
-            )
-        )
-
-    if not replacement_found:
+    """Return a pipeline copy with updated constraints for one stage."""
+    stage = pipeline.get_stage(stage_id)
+    if stage is None:
         raise ValueError(f"Pipeline {pipeline.model_type!r} has no stage {stage_id}")
-    return replace(pipeline, stages=tuple(stages))
+    replacement = replace(
+        stage,
+        sampling_constraints={**stage.sampling_constraints, **updates},
+    )
+    return replace(
+        pipeline,
+        stages=tuple(replacement if item.stage_id == stage_id else item for item in pipeline.stages),
+    )
 
 
 @dataclass
@@ -898,8 +880,8 @@ def _build_extras(
     extras: dict[str, Any] = {}
     sampling: dict[str, Any] = {}
     if ds is not None and ds.default_sampling_params:
-        sampling = copy.deepcopy(ds.default_sampling_params)
-    sampling = _deep_merge_mapping(sampling, ps.sampling_constraints)
+        sampling.update(ds.default_sampling_params)
+    sampling.update(ps.sampling_constraints)
     if sampling:
         extras["default_sampling_params"] = sampling
     if ds is not None and ds.default_pooling_params:
@@ -915,17 +897,6 @@ def _build_extras(
     if ps.extras:
         extras.update(ps.extras)
     return extras
-
-
-def _deep_merge_mapping(
-    base: Mapping[str, Any],
-    authoritative: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Merge nested mappings with ``authoritative`` values winning."""
-    return _get_recursively_merged_dict(
-        copy.deepcopy(dict(base)),
-        copy.deepcopy(dict(authoritative)),
-    )
 
 
 def merge_pipeline_deploy(

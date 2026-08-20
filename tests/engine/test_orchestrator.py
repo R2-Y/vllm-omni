@@ -154,15 +154,7 @@ class FakeStageClient:
     def set_engine_outputs(self, outputs) -> None:
         return None
 
-    def process_engine_inputs(
-        self,
-        source_outputs,
-        prompt=None,
-        streaming_context=None,
-        sampling_params=None,
-        source_sampling_params=None,
-        target_sampling_params=None,
-    ):
+    def process_engine_inputs(self, source_outputs, prompt=None, streaming_context=None):
         return list(self.next_inputs)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:

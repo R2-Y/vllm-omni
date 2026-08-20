@@ -1539,8 +1539,8 @@ class MossAudioTokenizerModel(MossAudioTokenizerPreTrainedModel):
         _ = config.version
         self.sampling_rate = config.sampling_rate
         self.downsample_rate = config.downsample_rate
-        self.number_channels = config.number_channels
-        self.enable_channel_interleave = config.enable_channel_interleave
+        self.number_channels = getattr(config, "number_channels", getattr(config, "num_channels", 1))
+        self.enable_channel_interleave = getattr(config, "enable_channel_interleave", True)
         self.causal_transformer_context_duration = config.causal_transformer_context_duration
 
         # Build encoder

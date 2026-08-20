@@ -32,7 +32,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from x_transformers.x_transformers import RotaryEmbedding
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.layers.timestep_embedding import DiTTimestepEmbedding
 from vllm_omni.model_executor.models.common.ming.aggregator import Aggregator
 from vllm_omni.model_executor.models.common.ming.audio_vae import AudioVAE
@@ -624,12 +623,7 @@ class MingAudioGenerator:
 
         # Transformers >=5.x may expose these config values as 0-d tensors.
         sample_rate = float(self._audio_vae.config.sample_rate)
-        vae_patch_size = get_required_config_field(
-            self._audio_vae.config,
-            "patch_size",
-            expected_type=int,
-            model="ming_flash_omni",
-        )
+        vae_patch_size = float(getattr(self._audio_vae.config, "patch_size", 4))
         hop_size = float(getattr(self._audio_vae.decoder, "hop_length", 320))
         seconds_per_step = (self.patch_size * vae_patch_size * hop_size) / sample_rate
         if seconds_per_step <= 0:

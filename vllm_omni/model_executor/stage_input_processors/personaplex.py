@@ -20,7 +20,6 @@ from typing import Any
 
 import torch
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     MetaStruct,
@@ -195,15 +194,8 @@ def talker2code2wav_async_chunk(
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk = get_required_config_field(
-        cfg, "codec_chunk_frames", expected_type=int, model="personaplex"
-    )
-    initial_chunk = get_required_config_field(
-        cfg,
-        "initial_codec_chunk_frames",
-        expected_type=int,
-        model="personaplex",
-    )
+    chunk = int(cfg.get("codec_chunk_frames", 25))
+    initial_chunk = int(cfg.get("initial_codec_chunk_frames") or 0)
     if chunk <= 0 or initial_chunk < 0:
         raise ValueError(
             "PersonaPlex codec chunk sizes must be positive/non-negative: "

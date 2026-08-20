@@ -5,9 +5,6 @@ import pytest
 import torch
 
 from vllm_omni.model_executor.models.cosyvoice3.utils import mel_spectrogram
-from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-    StepAudio2Config,
-)
 from vllm_omni.model_executor.models.step_audio2.step_audio2_token2wav import _build_hift
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -18,7 +15,7 @@ flashcosyvoice_audio = pytest.importorskip("flashcosyvoice.utils.audio")
 
 def test_vendored_hift_matches_flashcosyvoice() -> None:
     reference = flashcosyvoice_hifigan.HiFTGenerator().eval()
-    vendored = _build_hift(StepAudio2Config()).eval()
+    vendored = _build_hift().eval()
 
     # Strict loading verifies that the vendored architecture remains compatible
     # with the Step-Audio2 checkpoint produced for flashcosyvoice.

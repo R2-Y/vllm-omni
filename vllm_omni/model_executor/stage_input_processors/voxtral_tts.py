@@ -4,7 +4,6 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     MetaStruct,
@@ -61,21 +60,9 @@ def generator2tokenizer_async_chunk(
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_size = get_required_config_field(
-        cfg, "codec_chunk_frames", expected_type=int, model="voxtral_tts"
-    )
-    chunk_size_at_begin = get_required_config_field(
-        cfg,
-        "codec_chunk_frames_at_begin",
-        expected_type=int,
-        model="voxtral_tts",
-    )
-    left_context_size = get_required_config_field(
-        cfg,
-        "codec_left_context_frames",
-        expected_type=int,
-        model="voxtral_tts",
-    )
+    chunk_size = int(cfg.get("codec_chunk_frames", 25))
+    chunk_size_at_begin = int(cfg.get("codec_chunk_frames_at_begin", 5))
+    left_context_size = int(cfg.get("codec_left_context_frames", 25))
     if chunk_size <= 0 or left_context_size < 0:
         raise ValueError(
             f"Invalid codec chunk config: codec_chunk_frames={chunk_size}, "

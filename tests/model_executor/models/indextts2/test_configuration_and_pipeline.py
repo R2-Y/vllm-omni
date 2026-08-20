@@ -3,18 +3,17 @@
 
 from pathlib import Path
 
+import pytest
 import yaml
 
-from vllm_omni.config.pipeline_registry import OMNI_PIPELINES, resolve_pipeline_config
+from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 from vllm_omni.model_executor.models.indextts2.configuration_indextts2 import (
     IndexTTS2Config,
     IndexTTS25Config,
 )
-from vllm_omni.model_executor.models.indextts2.pipeline import (
-    INDEXTTS2_PIPELINE,
-    INDEXTTS25_PIPELINE,
-    resolve_indextts2_pipeline,
-)
+from vllm_omni.model_executor.models.indextts2.pipeline import INDEXTTS25_PIPELINE
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_indextts25_defaults_are_distinct_from_v2():
@@ -56,8 +55,7 @@ def test_indextts25_explicit_overrides_win_over_defaults():
 
 
 def test_indextts25_pipeline_is_registered_with_two_distinct_stages():
-    assert OMNI_PIPELINES["indextts2"] is resolve_indextts2_pipeline
-    assert OMNI_PIPELINES["indextts2_5"] is resolve_indextts2_pipeline
+    assert OMNI_PIPELINES["indextts2_5"] is INDEXTTS25_PIPELINE
     assert INDEXTTS25_PIPELINE.default_deploy_config_name == "indextts2_5.yaml"
     assert [stage.model_stage for stage in INDEXTTS25_PIPELINE.stages] == [
         "indextts2_5_talker",
@@ -68,21 +66,6 @@ def test_indextts25_pipeline_is_registered_with_two_distinct_stages():
         "IndexTTS25S2MelDecoder",
     ]
     assert all("tokenizer" not in stage.extras for stage in INDEXTTS25_PIPELINE.stages)
-
-
-def test_indextts_resolver_preserves_default_topology_without_config():
-    assert resolve_pipeline_config("indextts2") is INDEXTTS2_PIPELINE
-    assert resolve_pipeline_config("indextts2_5") is INDEXTTS25_PIPELINE
-    assert resolve_pipeline_config("indextts2_5", IndexTTS2Config()) is INDEXTTS25_PIPELINE
-
-
-def test_indextts_custom_stop_is_bound_by_registry_resolver():
-    config = IndexTTS25Config(gpt={"stop_mel_token": 8123, "number_mel_codes": 8194})
-
-    pipeline = resolve_pipeline_config("indextts2_5", config)
-
-    assert pipeline is not None
-    assert pipeline.get_stage(0).sampling_constraints["stop_token_ids"] == [8123]
 
 
 def test_indextts25_default_deploy_selects_validated_triton_backend():

@@ -2,9 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for Step-Audio2 thinker processor, encoder, and token handling."""
 
-from dataclasses import asdict
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
@@ -41,7 +38,7 @@ def test_audio_preprocessing():
 
     audio, _sample_rate = create_dummy_audio(sample_rate=16000, duration_sec=1.0)
 
-    mel = log_mel_spectrogram(audio, sample_rate=16000, n_mels=128)
+    mel = log_mel_spectrogram(audio)
 
     assert mel.ndim == 2, f"Expected 2D tensor, got {mel.ndim}D"
     assert mel.shape[0] == 128, f"Expected 128 mel bins, got {mel.shape[0]}"
@@ -56,40 +53,35 @@ def test_audio_preprocessing():
 
 def test_feature_length_calculation():
     """Test that audio feature length calculation is correct."""
-    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-        StepAudio2Config,
-    )
     from vllm_omni.model_executor.models.step_audio2.step_audio2_thinker import (
         calculate_audio_feature_length,
     )
 
-    config = StepAudio2Config()
-    kwargs = {
-        "encoder_downsample_rate": config.encoder_downsample_rate,
-        "adapter_stride": config.adapter_stride,
-    }
-    assert calculate_audio_feature_length(1000, **kwargs) == 125
+    assert calculate_audio_feature_length(1000) == 125
 
-    assert calculate_audio_feature_length(100, **kwargs) > 0
+    assert calculate_audio_feature_length(100) > 0
 
-    assert calculate_audio_feature_length(1, **kwargs) >= 1
+    assert calculate_audio_feature_length(1) >= 1
 
 
-def test_token_config_contract():
-    """Test that token ranges are owned and validated by the config schema."""
-    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-        StepAudio2Config,
+def test_token_config_constants():
+    """Test that token configuration constants are set correctly."""
+    from vllm_omni.model_executor.models.step_audio2.step_audio2_constants import (
+        DEFAULT_TOKEN_CONFIG,
+        STEP_AUDIO2_AUDIO_END,
+        STEP_AUDIO2_AUDIO_PATCH_TOKEN_ID,
+        STEP_AUDIO2_AUDIO_START,
+        STEP_AUDIO2_AUDIO_VOCAB_SIZE,
+        STEP_AUDIO2_TEXT_MAX,
     )
 
-    config = StepAudio2Config(
-        text_max=100,
-        audio_patch_token_id=110,
-        audio_start=120,
-        audio_vocab_size=32,
-        audio_eos=31,
-    )
-    config.validate()
-    assert config.audio_end == 151
+    assert STEP_AUDIO2_TEXT_MAX < STEP_AUDIO2_AUDIO_START, "Text tokens should come before audio tokens"
+    assert STEP_AUDIO2_AUDIO_END == STEP_AUDIO2_AUDIO_START + STEP_AUDIO2_AUDIO_VOCAB_SIZE - 1
+    assert STEP_AUDIO2_AUDIO_PATCH_TOKEN_ID > STEP_AUDIO2_TEXT_MAX
+    assert STEP_AUDIO2_AUDIO_PATCH_TOKEN_ID < STEP_AUDIO2_AUDIO_START
+
+    assert DEFAULT_TOKEN_CONFIG.text_max == STEP_AUDIO2_TEXT_MAX
+    assert DEFAULT_TOKEN_CONFIG.audio_start == STEP_AUDIO2_AUDIO_START
 
 
 def test_mm_field_config_structure():
@@ -134,17 +126,13 @@ def test_audio_encoder_output_shape():
 
 def test_token_separation():
     """Test that token separation works correctly."""
-    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-        StepAudio2Config,
-    )
     from vllm_omni.model_executor.models.step_audio2.step_audio2_thinker import (
         StepAudio2ThinkerForConditionalGeneration,
     )
 
-    config = StepAudio2Config()
-    token_ids = [100, 200, config.audio_start + 4, 300, config.audio_start + 104, 400]
+    token_ids = [100, 200, 151700, 300, 151800, 400]
 
-    text_tokens, audio_tokens = StepAudio2ThinkerForConditionalGeneration.separate_tokens(token_ids, config)
+    text_tokens, audio_tokens = StepAudio2ThinkerForConditionalGeneration.separate_tokens(token_ids)
 
     assert text_tokens == [100, 200, 300, 400]
     assert audio_tokens == [4, 104]
@@ -152,51 +140,12 @@ def test_token_separation():
 
 def test_has_audio_output():
     """Test detection of audio tokens in output."""
-    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-        StepAudio2Config,
-    )
     from vllm_omni.model_executor.models.step_audio2.step_audio2_thinker import (
         StepAudio2ThinkerForConditionalGeneration,
     )
 
-    config = StepAudio2Config()
     text_only = [100, 200, 300]
-    assert not StepAudio2ThinkerForConditionalGeneration.has_audio_output(text_only, config)
+    assert not StepAudio2ThinkerForConditionalGeneration.has_audio_output(text_only)
 
-    with_audio = [100, 200, config.audio_start + 4, 300]
-    assert StepAudio2ThinkerForConditionalGeneration.has_audio_output(with_audio, config)
-
-
-def test_runtime_config_round_trip_uses_checkpoint_values():
-    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-        StepAudio2Config,
-    )
-
-    config = StepAudio2Config.from_hf_config(
-        SimpleNamespace(
-            step_audio2={
-                "input_sample_rate": 22050,
-                "output_sample_rate": 32000,
-                "audio_start": 120000,
-                "audio_patch_token_id": 119999,
-                "text_max": 119998,
-            }
-        )
-    )
-    runtime = StepAudio2Config.from_mapping(asdict(config))
-
-    assert runtime.input_sample_rate == 22050
-    assert runtime.output_sample_rate == 32000
-    assert runtime.audio_start == 120000
-
-
-def test_runtime_config_rejects_missing_field():
-    from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-        StepAudio2Config,
-    )
-
-    values = asdict(StepAudio2Config())
-    values.pop("output_sample_rate")
-
-    with pytest.raises(ValueError, match="output_sample_rate"):
-        StepAudio2Config.from_mapping(values)
+    with_audio = [100, 200, 151700, 300]
+    assert StepAudio2ThinkerForConditionalGeneration.has_audio_output(with_audio)

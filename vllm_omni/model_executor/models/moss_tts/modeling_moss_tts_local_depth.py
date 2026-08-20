@@ -168,8 +168,8 @@ class MossTTSLocalDepthTransformer(nn.Module):
         self.hidden_size = int(hidden_size if hidden_size is not None else gpt2_config.n_embd)
         n_head = int(gpt2_config.n_head)
         inner_size = int(gpt2_config.n_inner)
-        eps = float(gpt2_config.layer_norm_epsilon)
-        rope_base = float(gpt2_config.rope_base)
+        eps = float(getattr(gpt2_config, "layer_norm_epsilon", 1e-5))
+        rope_base = float(getattr(gpt2_config, "rope_base", 1_000_000.0))
         self.h = nn.ModuleList([_MossTTSLocalBlock(self.hidden_size, n_head, inner_size, rope_base, eps)])
         self.ln_f = nn.LayerNorm(self.hidden_size, eps=eps)
         self._compiled_forward_prefix = None

@@ -76,19 +76,6 @@ class TestOmniPayloadStruct:
         d = to_dict(s)
         assert d == {"meta": {"left_context_size": 10}}
 
-    def test_model_runtime_is_opaque_and_round_trips(self):
-        model_runtime = {"example_model": {"custom_id": 17}}
-        payload = {"meta": {"model_runtime": model_runtime}}
-
-        struct = to_struct(payload)
-
-        assert struct.meta.model_runtime == model_runtime
-        assert to_dict(struct) == payload
-        assert flatten_payload(payload) == {
-            "meta.model_runtime": model_runtime,
-        }
-        assert unflatten_payload({"meta.model_runtime": model_runtime}) == payload
-
     def test_struct_with_all_categories(self):
         d = {
             "hidden_states": {"output": torch.zeros(1), "last": torch.ones(2, 4)},

@@ -22,6 +22,7 @@ from .audio_prep import (
     _take_scalar,
 )
 from .config_ming_tts import (
+    AUDIO_START_TOKEN_ID,
     KEY_CFG,
     KEY_DECODE_STEP,
     KEY_LAST_STOP_PROB,
@@ -161,7 +162,7 @@ class MingTTSForConditionalGeneration(nn.Module, SupportsPP, CustomProcessMixin)
             request_id = info_dict.get(KEY_REQUEST_ID, info_dict.get("request_id"))
             if request_id is not None:
                 update[KEY_REQUEST_ID] = request_id
-            if int(input_ids.shape[0]) > 1 and int(input_ids[-1].item()) == self.ming_config.audio_start_token_id:
+            if int(input_ids.shape[0]) > 1 and int(input_ids[-1].item()) == AUDIO_START_TOKEN_ID:
                 return input_ids[:-1], input_embeds[:-1], update
             return input_ids, input_embeds, update
 

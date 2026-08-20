@@ -31,11 +31,11 @@ from vllm.v1.sample.sampler import Sampler
 from vllm_omni.model_executor.models.cosyvoice3.code2wav_core.hifigan import HiFTGenerator
 from vllm_omni.model_executor.models.cosyvoice3.utils import mel_spectrogram
 from vllm_omni.model_executor.models.output_templates import OmniOutput
-from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-    StepAudio2Config,
-)
 from vllm_omni.model_executor.models.step_audio2.step_audio2_constants import (
+    DEFAULT_STREAM_CONFIG,
+    DEFAULT_TOKEN2WAV_CONFIG,
     STEP_AUDIO2_DEFAULT_PROMPT_WAV,
+    STREAM_SOURCE_CACHE_LEN,
 )
 
 logger = init_logger(__name__)
@@ -84,9 +84,9 @@ class _ConvRNNF0Predictor(nn.Module):
         return self.classifier(self.condnet(x).transpose(1, 2)).squeeze(-1).abs()
 
 
-def _build_hift(config: StepAudio2Config) -> HiFTGenerator:
+def _build_hift() -> HiFTGenerator:
     return HiFTGenerator(
-        sampling_rate=config.output_sample_rate,
+        sampling_rate=24000,
         upsample_rates=[8, 5, 3],
         upsample_kernel_sizes=[16, 11, 7],
         source_resblock_kernel_sizes=[7, 7, 11],
@@ -101,16 +101,15 @@ class StepAudio2Token2WavCore(nn.Module):
     def __init__(
         self,
         model_path: str,
-        config: StepAudio2Config,
-        device: str,
         float16: bool = False,
+        device: str = "cuda",
+        n_timesteps: int = DEFAULT_TOKEN2WAV_CONFIG.n_timesteps,
     ):
         super().__init__()
         self.model_path = model_path
-        self.config = config
         self.float16 = float16
         self.device = torch.device(device)
-        self.n_timesteps = config.n_timesteps
+        self.n_timesteps = n_timesteps
 
         self._models_loaded = False
         self._audio_tokenizer = None
@@ -121,8 +120,8 @@ class StepAudio2Token2WavCore(nn.Module):
         self.cache = {}
 
         # Streaming state (constants from centralised config)
-        self.mel_cache_len = config.mel_cache_len
-        self.source_cache_len = config.stream_source_cache_len
+        self.mel_cache_len = DEFAULT_STREAM_CONFIG.mel_cache_len
+        self.source_cache_len = STREAM_SOURCE_CACHE_LEN
         self.speech_window: torch.Tensor | None = None  # created lazily on device
 
         # On Ascend the talker worker never routes through
@@ -172,7 +171,7 @@ class StepAudio2Token2WavCore(nn.Module):
             torch.load(f"{self.model_path}/flow.pt", map_location="cpu", weights_only=True), strict=True
         )
         self._flow.to(self.device).eval()
-        self._hift = _build_hift(self.config)
+        self._hift = _build_hift()
 
         hift_state_dict = {
             k.replace("generator.", ""): v
@@ -241,14 +240,10 @@ class StepAudio2Token2WavCore(nn.Module):
             audio_np_raw = np.mean(audio_np_raw, axis=-1)
         sample_rate = int(sample_rate)
 
-        # Input-rate branch: s3tokenizer + speaker embedding
+        # 16 kHz branch: s3tokenizer + speaker embedding
         audio_16k = audio_np_raw.astype(np.float32)
-        if sample_rate != self.config.input_sample_rate:
-            audio_16k = librosa.resample(
-                y=audio_16k,
-                orig_sr=sample_rate,
-                target_sr=self.config.input_sample_rate,
-            )
+        if sample_rate != 16000:
+            audio_16k = librosa.resample(y=audio_16k, orig_sr=sample_rate, target_sr=16000)
         audio = torch.from_numpy(audio_16k)
         mels = s3tokenizer.log_mel_spectrogram(audio)
         mels, mels_lens = s3tokenizer.padding([mels])
@@ -256,35 +251,26 @@ class StepAudio2Token2WavCore(nn.Module):
             mels.to(self.device), mels_lens.to(self.device)
         )
 
-        spk_feat = kaldi.fbank(
-            audio.unsqueeze(0),
-            num_mel_bins=self.config.prompt_num_mels,
-            dither=0,
-            sample_frequency=self.config.input_sample_rate,
-        )
+        spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
         spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
         spk_emb = self._forward_spk_embedding(spk_feat)
 
-        # Output-rate branch: mel spectrogram for flow-model conditioning.
-        # Must resample from the original audio, not the input-rate version.
+        # 24 kHz branch: mel spectrogram for flow model conditioning
+        # Must resample from the ORIGINAL audio, not the 16 kHz version.
         audio_24k = audio_np_raw.astype(np.float32)
-        if sample_rate != self.config.output_sample_rate:
-            audio_24k = librosa.resample(
-                y=audio_24k,
-                orig_sr=sample_rate,
-                target_sr=self.config.output_sample_rate,
-            )
+        if sample_rate != 24000:
+            audio_24k = librosa.resample(y=audio_24k, orig_sr=sample_rate, target_sr=24000)
         audio_24k_t = torch.from_numpy(audio_24k).unsqueeze(0)  # [1, T]
         prompt_mel = (
             mel_spectrogram(
                 audio_24k_t,
-                n_fft=self.config.prompt_n_fft,
-                num_mels=self.config.prompt_num_mels,
-                sampling_rate=self.config.output_sample_rate,
-                hop_size=self.config.prompt_hop_size,
-                win_size=self.config.prompt_win_size,
-                fmin=self.config.prompt_fmin,
-                fmax=self.config.prompt_fmax,
+                n_fft=1920,
+                num_mels=80,
+                sampling_rate=24000,
+                hop_size=480,
+                win_size=1920,
+                fmin=0,
+                fmax=8000,
                 center=False,
             )
             .transpose(1, 2)
@@ -339,12 +325,7 @@ class StepAudio2Token2WavCore(nn.Module):
 
         if return_bytes:
             output = io.BytesIO()
-            torchaudio.save(
-                output,
-                wav.cpu(),
-                sample_rate=self.config.output_sample_rate,
-                format="wav",
-            )
+            torchaudio.save(output, wav.cpu(), sample_rate=DEFAULT_TOKEN2WAV_CONFIG.sample_rate, format="wav")
             return output.getvalue()
         else:
             return wav
@@ -364,7 +345,7 @@ class StepAudio2Token2WavCore(nn.Module):
                 device=self.device, dtype=torch.float32
             )
 
-        pre_lookahead = self.config.pre_lookahead_len
+        pre_lookahead = DEFAULT_STREAM_CONFIG.pre_lookahead_len
         state.stream_cache = self.flow.setup_cache(
             torch.cat(
                 [prompt_speech_tokens, prompt_speech_tokens[:, :pre_lookahead]],
@@ -418,7 +399,7 @@ class StepAudio2Token2WavCore(nn.Module):
             )
 
         # Trim estimator attention cache to avoid unbounded growth
-        keep = self.config.estimator_cache_keep
+        keep = DEFAULT_STREAM_CONFIG.estimator_cache_keep
         est_att = state.stream_cache.get("estimator_att_cache")
         if est_att is not None and est_att.shape[4] > (prompt_mels.shape[1] + keep):
             state.stream_cache["estimator_att_cache"] = torch.cat(
@@ -473,7 +454,6 @@ class StepAudio2Token2WavForConditionalGeneration(nn.Module, SupportsPP):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
-        self.step_audio2_config = StepAudio2Config.from_hf_config(self.config)
 
         model_path = getattr(self.config, "token2wav_path", None)
         model_name_or_path = vllm_config.model_config.model
@@ -491,12 +471,7 @@ class StepAudio2Token2WavForConditionalGeneration(nn.Module, SupportsPP):
         if hasattr(vllm_config, "device_config") and vllm_config.device_config:
             device = str(vllm_config.device_config.device)
 
-        self.token2wav = StepAudio2Token2WavCore(
-            model_path=model_path,
-            config=self.step_audio2_config,
-            float16=float16,
-            device=device,
-        )
+        self.token2wav = StepAudio2Token2WavCore(model_path=model_path, float16=float16, device=device)
 
         self.have_multimodal_outputs = True
         # Required for the runner to pass async_chunk info via
@@ -662,12 +637,7 @@ class StepAudio2Token2WavForConditionalGeneration(nn.Module, SupportsPP):
             )
 
         info = next(info for info in runtime_additional_information if "left_context_size" in info)
-        if "left_context_size" not in info:
-            raise ValueError(
-                "Step-Audio2 Token2Wav runtime metadata requires "
-                "'left_context_size'"
-            )
-        last_chunk = info["left_context_size"] == 1
+        last_chunk = info.get("left_context_size", 0) == 1
 
         # --- Manage single stream state ---
         # If the previous request was preempted (setup_done but not finished),

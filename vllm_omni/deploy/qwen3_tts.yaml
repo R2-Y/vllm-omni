@@ -24,7 +24,6 @@ connectors:
       # Must match the decoder sliding attention window.
       codec_chunk_frames: 25
       codec_left_context_frames: 72
-      ref_code_context_frames: 72
       # Emit only the first audio chunk early, then return to codec_chunk_frames.
       initial_codec_chunk_frames: 1
       # Chunk ramp (opt-in): gradual size increase for first N chunks to

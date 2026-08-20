@@ -150,7 +150,6 @@ class NemotronVoiceChatConfig(PretrainedConfig):
         self.frame_length = float(self.nemo_data.get("frame_length", 0.08))
         self.source_sample_rate = int(self.nemo_data.get("source_sample_rate", 16000))
         self.target_sample_rate = int(self.nemo_data.get("target_sample_rate", 22050))
-        self.tts_source_sample_rate = int(self.tts_data.get("source_sample_rate", self.target_sample_rate))
 
         self.thinker_text_config = self._resolve_thinker_text_config(thinker_text_config)
         self.talker_config = self._coerce(

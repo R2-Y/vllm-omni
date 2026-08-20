@@ -10,24 +10,12 @@ from vllm.logger import init_logger
 from vllm_omni.data_entry_keys import CodesStruct, MetaStruct, OmniPayloadStruct
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.inputs.data import OmniTokensPrompt
-from vllm_omni.model_executor.models.step_audio2.configuration_step_audio2 import (
-    StepAudio2Config,
+from vllm_omni.model_executor.models.step_audio2.step_audio2_constants import (
+    DEFAULT_STREAM_CONFIG,
+    DEFAULT_TOKEN_CONFIG,
 )
 
 logger = init_logger(__name__)
-
-
-def _runtime_config(multimodal_output: Any) -> StepAudio2Config:
-    if not isinstance(multimodal_output, dict):
-        raise ValueError("Step-Audio2 stage transfer requires multimodal runtime metadata")
-    meta = multimodal_output.get("meta")
-    runtime = meta.get("model_runtime") if isinstance(meta, dict) else None
-    values = runtime.get("step_audio2") if isinstance(runtime, dict) else None
-    if not isinstance(values, dict):
-        raise ValueError(
-            "Step-Audio2 stage transfer requires meta.model_runtime.step_audio2"
-        )
-    return StepAudio2Config.from_mapping(values)
 
 
 def _ensure_list(x):
@@ -83,9 +71,8 @@ def thinker2token2wav_async_chunk(
     Returns:
         Structured connector payload, or None if the chunk is not yet ready.
     """
-    config = _runtime_config(multimodal_output)
-    audio_start = config.audio_start
-    audio_eos = config.audio_eos
+    audio_start = DEFAULT_TOKEN_CONFIG.audio_start
+    audio_eos = DEFAULT_TOKEN_CONFIG.audio_eos
     finished = bool(is_finished or request.is_finished())
 
     # Only look at decode (generated) tokens — the prompt may contain
@@ -100,8 +87,8 @@ def thinker2token2wav_async_chunk(
     audio_tokens = [t for t in audio_tokens if t < audio_eos]
 
     # Flow model streaming parameters (from centralised config)
-    chunk_size = config.chunk_size
-    pre_lookahead_len = config.pre_lookahead_len
+    chunk_size = DEFAULT_STREAM_CONFIG.chunk_size
+    pre_lookahead_len = DEFAULT_STREAM_CONFIG.pre_lookahead_len
 
     # consumed = number of tokens whose mel output has been produced.
     # We track this via transfer_manager.code_prompt_token_ids[request_id].
@@ -178,12 +165,13 @@ def thinker2token2wav(
     thinker_outputs = source_outputs
     token2wav_inputs = []
 
+    # Token configuration uses the fixed Step-Audio2 model constants.
+    audio_start = DEFAULT_TOKEN_CONFIG.audio_start
+    audio_eos = DEFAULT_TOKEN_CONFIG.audio_eos  # Relative to audio start
+
     # Process each thinker output
     for i, thinker_output in enumerate(thinker_outputs):
         output = thinker_output.outputs[0]
-        config = _runtime_config(getattr(output, "multimodal_output", None))
-        audio_start = config.audio_start
-        audio_eos = config.audio_eos
 
         # Only look at decode (generated) tokens — the prompt may contain
         # historical audio tokens from prior conversation turns.

@@ -1,26 +1,12 @@
 # Copyright 2026 Tencent.
-from typing import Any
-
-from transformers import Qwen2Config
 from transformers.configuration_utils import PretrainedConfig
 
+# audio_token_index: token IDs >= this value are audio codes.
+# Matches config.audio_token_index and len(tokenizer) = 151671.
+# Note: the LLM total vocab_size is 168055 (includes audio tokens), which
+# is different from this boundary value.
+COVO_AUDIO_TOKEN_INDEX = 151671
 
-class CovoAudioConfig(Qwen2Config):
-    """Stage-0 config extension for Covo tokenizer/runtime boundaries."""
-
-    def __init__(
-        self,
-        audio_token_index: int = 151671,
-        audio_sample_rate: int = 16000,
-        max_audio_tokens: int = 188,
-        max_audio_seconds: int = 30,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.audio_token_index = audio_token_index
-        self.audio_sample_rate = audio_sample_rate
-        self.max_audio_tokens = max_audio_tokens
-        self.max_audio_seconds = max_audio_seconds
 
 class CovoAudioCode2WavConfig(PretrainedConfig):
     model_type = "covo_audio_code2wav"

@@ -9,7 +9,6 @@ from typing import Any
 import torch
 from vllm.inputs import TextPrompt
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import CodesStruct, MetaStruct, OmniPayloadStruct
 from vllm_omni.experimental.fullduplex.engine.intermediate import (
     build_duplex_intermediate_buffer,
@@ -131,18 +130,8 @@ def _codec_config(transfer_manager: Any) -> tuple[int, int]:
     raw_config = getattr(connector, "config", {}) or {}
     config = raw_config.get("extra", raw_config) if isinstance(raw_config, dict) else {}
     config = config if isinstance(config, dict) else {}
-    chunk_frames = get_required_config_field(
-        config,
-        "codec_chunk_frames",
-        expected_type=int,
-        model="minicpmo_4_5",
-    )
-    left_context_frames = get_required_config_field(
-        config,
-        "codec_left_context_frames",
-        expected_type=int,
-        model="minicpmo_4_5",
-    )
+    chunk_frames = int(config.get("codec_chunk_frames", 25))
+    left_context_frames = int(config.get("codec_left_context_frames", 3))
     if chunk_frames <= 0 or left_context_frames < 0:
         raise ValueError(
             "Invalid MiniCPM-o codec chunk config: "

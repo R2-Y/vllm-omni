@@ -22,7 +22,7 @@ from vllm_omni.model_executor.models.minimax_music3.constants import (
 )
 from vllm_omni.model_executor.models.minimax_music3.prompt import (
     build_prompt,
-    resolve_special_token_ids,
+    validate_tokenizer_ids,
 )
 
 if TYPE_CHECKING:
@@ -117,8 +117,7 @@ class MiniMaxMusic3Adapter(ARTTSAdapter):
         # length match can only be guaranteed on ids. Handing over text would
         # leave the expansion with nothing to build the twin from, and a request
         # that decodes unguided produces a different song.
-        tokenizer = self._tokenizer()
-        token_ids = tokenizer.encode(prompt)
+        token_ids = self._tokenizer().encode(prompt)
         if len(token_ids) > MAX_PROMPT_TOKENS:
             raise ValueError(
                 f"MiniMax Music 3 prompt is {len(token_ids)} tokens; "
@@ -135,10 +134,7 @@ class MiniMaxMusic3Adapter(ARTTSAdapter):
         return PreparedRequest(
             prompt={
                 "prompt_token_ids": token_ids,
-                "additional_information": {
-                    "max_audio_frames": [max_frames],
-                    "special_token_ids": self._special_token_ids,
-                },
+                "additional_information": {"max_audio_frames": [max_frames]},
             },
             tts_params={"max_audio_frames": [max_frames]},
             model_type=self.name,
@@ -159,7 +155,7 @@ class MiniMaxMusic3Adapter(ARTTSAdapter):
             if not model_path:
                 model_path = self.ctx.server.engine_client.model_config.tokenizer
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            self._special_token_ids = resolve_special_token_ids(tokenizer)
+            validate_tokenizer_ids(tokenizer)
             self._cached_tokenizer = tokenizer
         return self._cached_tokenizer
 

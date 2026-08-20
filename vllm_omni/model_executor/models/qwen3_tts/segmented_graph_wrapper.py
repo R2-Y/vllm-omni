@@ -62,7 +62,7 @@ class CUDAGraphDecoderWrapper:
         self.stateless_states: dict[tuple[int, int], dict] = {}
 
         self._device = None
-        self.prefix_length = int(self.decoder.config.sliding_window or 0)
+        self.prefix_length = int(getattr(self.decoder.config, "sliding_window", 0) or 0)
         self.codec_chunk_frames = int(codec_chunk_frames)
         self.codec_chunk_ramp = [int(size) for size in codec_chunk_ramp or ()]
         self.initial_chunk_frames = self.codec_chunk_ramp[0] if self.codec_chunk_ramp else int(initial_chunk_frames)

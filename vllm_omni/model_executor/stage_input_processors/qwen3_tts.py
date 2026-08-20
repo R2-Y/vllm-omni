@@ -6,18 +6,12 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import (
     CodesStruct,
     MetaStruct,
     OmniPayload,
     OmniPayloadStruct,
     to_dict,
-)
-from vllm_omni.model_executor.models.qwen3_tts.runtime_config import (
-    get_required_qwen3_tts_runtime_int,
-    qwen3_tts_runtime_from_meta,
-    qwen3_tts_runtime_from_sampling_params,
 )
 from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     compute_dynamic_initial_chunk_size,
@@ -35,7 +29,7 @@ from vllm_omni.model_executor.stage_input_processors.tts_utils import (
 logger = init_logger(__name__)
 
 
-def _qwen3_tts_degenerate_finished_payload(num_quantizers: int):
+def _qwen3_tts_degenerate_finished_payload():
     """Single-placeholder-frame finished payload for a degenerate talker take.
 
     Returning ``None`` here makes the connector silently drop the request, and
@@ -57,7 +51,7 @@ def _qwen3_tts_degenerate_finished_payload(num_quantizers: int):
     placeholder audio.
     """
     return {
-        "codes": {"audio": torch.ones(num_quantizers, dtype=torch.long)},
+        "codes": {"audio": torch.ones(_NUM_QUANTIZERS_DEFAULT, dtype=torch.long)},
         "meta": {"finished": torch.tensor(True, dtype=torch.bool)},
     }
 
@@ -83,8 +77,6 @@ def talker2code2wav_async_chunk(
     is_finished: bool = False,
 ) -> OmniPayloadStruct | None:
     request_id = request.external_req_id
-    runtime = qwen3_tts_runtime_from_sampling_params(getattr(request, "sampling_params", None))
-    expected_num_quantizers = get_required_qwen3_tts_runtime_int(runtime, "num_code_groups")
     finished = bool(is_finished or request.is_finished())
     request_payload = getattr(transfer_manager, "request_payload", None)
     if request_payload is None:
@@ -95,11 +87,6 @@ def talker2code2wav_async_chunk(
         frame = _extract_last_frame(multimodal_output)
         if frame is not None:
             codec_codes = frame.cpu().tolist()
-            if len(codec_codes) != expected_num_quantizers:
-                raise ValueError(
-                    f"Qwen3-TTS codec frame has {len(codec_codes)} groups; "
-                    f"checkpoint requires {expected_num_quantizers}"
-                )
             transfer_manager.code_prompt_token_ids[request_id].append(codec_codes)
         ref_code = multimodal_output.get("codes", {}).get("ref")
         if isinstance(ref_code, torch.Tensor) and ref_code.numel() > 0 and request_payload.get(request_id) is None:
@@ -110,27 +97,10 @@ def talker2code2wav_async_chunk(
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_size = get_required_config_field(
-        cfg, "codec_chunk_frames", expected_type=int, model="qwen3_tts"
-    )
-    left_context_size_config = get_required_config_field(
-        cfg,
-        "codec_left_context_frames",
-        expected_type=int,
-        model="qwen3_tts",
-    )
-    configured_initial_chunk_size = get_required_config_field(
-        cfg,
-        "initial_codec_chunk_frames",
-        expected_type=int,
-        model="qwen3_tts",
-    )
-    ref_code_context_frames = get_required_config_field(
-        cfg,
-        "ref_code_context_frames",
-        expected_type=int,
-        model="qwen3_tts",
-    )
+    chunk_size = int(cfg.get("codec_chunk_frames", 25))
+    left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
+    configured_initial_chunk_size = int(cfg.get("initial_codec_chunk_frames") or 0)
+    ref_code_context_frames = int(cfg.get("ref_code_context_frames") or left_context_size_config)
 
     # Ramp: parse once per transfer_manager (config is static for the adapter's
     # lifetime). When active, ramp replaces IC/steady entirely — skip dynamic IC.
@@ -326,14 +296,18 @@ def talker2code2wav_async_chunk(
 # stays empty.
 _FULL_PAYLOAD_REPLACE_KEYS: frozenset[str] = frozenset()
 
-def _filter_audio_codes_qwen3_tts(audio_codes: torch.Tensor, *, codebook_size: int) -> torch.Tensor:
+_CODEBOOK_SIZE = 2048
+_NUM_QUANTIZERS_DEFAULT = 16
+
+
+def _filter_audio_codes_qwen3_tts(audio_codes: torch.Tensor) -> torch.Tensor:
     """Filter zero-padded, out-of-range, and negative-padded codec frames."""
     if not isinstance(audio_codes, torch.Tensor) or audio_codes.numel() == 0:
         return audio_codes
     if audio_codes.ndim != 2:
         return audio_codes
     valid_mask = (
-        (audio_codes >= 0).all(dim=1) & audio_codes.any(dim=1) & (audio_codes.max(dim=1).values < codebook_size)
+        (audio_codes >= 0).all(dim=1) & audio_codes.any(dim=1) & (audio_codes.max(dim=1).values < _CODEBOOK_SIZE)
     )
     return audio_codes[valid_mask]
 
@@ -373,10 +347,6 @@ def talker2code2wav_token_only(
     source_outputs: list,
     prompt=None,
     _requires_multimodal_data: bool = False,
-    *,
-    sampling_params=None,
-    source_sampling_params=None,
-    target_sampling_params=None,
 ) -> list:
     """Sync-side placeholder for the non-async-chunk Stage-1 (code2wav) input.
 
@@ -395,27 +365,6 @@ def talker2code2wav_token_only(
         output = talker_output.outputs[0]
         mm = output.multimodal_output if hasattr(output, "multimodal_output") else None
         mm = mm if isinstance(mm, dict) else {}
-        mm_meta = mm.get("meta") if isinstance(mm, dict) else None
-        runtime_params = (
-            source_sampling_params
-            if source_sampling_params is not None
-            else target_sampling_params
-            if target_sampling_params is not None
-            else sampling_params
-        )
-        if isinstance(mm_meta, Mapping) and "model_runtime" in mm_meta:
-            runtime = qwen3_tts_runtime_from_meta(mm_meta)
-        elif runtime_params is not None:
-            runtime = qwen3_tts_runtime_from_sampling_params(runtime_params)
-        else:
-            output_sampling_params = getattr(talker_output, "sampling_params", None) or getattr(
-                output,
-                "sampling_params",
-                None,
-            )
-            runtime = qwen3_tts_runtime_from_sampling_params(output_sampling_params)
-        codebook_size = get_required_qwen3_tts_runtime_int(runtime, "codebook_size")
-        expected_num_quantizers = get_required_qwen3_tts_runtime_int(runtime, "num_code_groups")
         mm_codes = mm.get("codes", {}) if isinstance(mm, dict) else {}
         token_ids = getattr(output, "cumulative_token_ids", []) or []
         seq_len = max(len(token_ids) - 1, 0)
@@ -423,14 +372,14 @@ def talker2code2wav_token_only(
         audio = mm_codes.get("audio") if isinstance(mm_codes, dict) else None
         if isinstance(audio, torch.Tensor) and audio.numel() > 0:
             audio = audio.to(torch.long)
-            audio = _filter_audio_codes_qwen3_tts(audio, codebook_size=codebook_size)
+            audio = _filter_audio_codes_qwen3_tts(audio)
             if seq_len > 0 and audio.ndim == 2 and int(audio.shape[0]) > seq_len:
                 audio = audio[-seq_len:]
             num_audio_frames = int(audio.shape[0]) if audio.ndim == 2 else 0
-            num_quantizers = int(audio.shape[1]) if audio.ndim == 2 and audio.shape[1] > 0 else expected_num_quantizers
+            num_quantizers = int(audio.shape[1]) if audio.ndim == 2 and audio.shape[1] > 0 else _NUM_QUANTIZERS_DEFAULT
         else:
             num_audio_frames = 0
-            num_quantizers = expected_num_quantizers
+            num_quantizers = _NUM_QUANTIZERS_DEFAULT
 
         ref_code_raw = mm_codes.get("ref") if isinstance(mm_codes, dict) else None
         ref_code_len_raw = mm.get("meta", {}).get("ref_code_len") if isinstance(mm.get("meta"), dict) else None
@@ -473,13 +422,6 @@ def talker2code2wav_full_payload(
     """
     del transfer_manager
     rid = getattr(request, "request_id", "?")
-    flat_runtime = pooling_output.get("meta.model_runtime") if isinstance(pooling_output, dict) else None
-    if isinstance(flat_runtime, Mapping):
-        runtime = qwen3_tts_runtime_from_meta({"model_runtime": flat_runtime})
-    else:
-        runtime = qwen3_tts_runtime_from_sampling_params(getattr(request, "sampling_params", None))
-    codebook_size = get_required_qwen3_tts_runtime_int(runtime, "codebook_size")
-    expected_num_quantizers = get_required_qwen3_tts_runtime_int(runtime, "num_code_groups")
     if not isinstance(pooling_output, dict):
         logger.warning(
             "qwen3_tts.talker2code2wav_full_payload: pooling_output not a dict "
@@ -487,7 +429,7 @@ def talker2code2wav_full_payload(
             type(pooling_output).__name__,
             rid,
         )
-        return _qwen3_tts_degenerate_finished_payload(expected_num_quantizers)
+        return _qwen3_tts_degenerate_finished_payload()
 
     # codes.audio — try flat dotted first (flatten_payload), then nested fallback.
     audio = pooling_output.get("codes.audio")
@@ -502,27 +444,23 @@ def talker2code2wav_full_payload(
             list(pooling_output.keys()),
             rid,
         )
-        return _qwen3_tts_degenerate_finished_payload(expected_num_quantizers)
+        return _qwen3_tts_degenerate_finished_payload()
     audio = audio.to(torch.long)
-    audio = _filter_audio_codes_qwen3_tts(audio, codebook_size=codebook_size)
+    audio = _filter_audio_codes_qwen3_tts(audio)
     if audio.numel() == 0:
         logger.warning(
             "qwen3_tts.talker2code2wav_full_payload: audio empty after codec "
             "filter (negative/all-zero/out-of-range rows dropped) for req=%s.",
             rid,
         )
-        return _qwen3_tts_degenerate_finished_payload(expected_num_quantizers)
+        return _qwen3_tts_degenerate_finished_payload()
 
     output_token_ids = list(getattr(request, "output_token_ids", None) or [])
     seq_len = max(len(output_token_ids) - 1, 0)
     if seq_len > 0 and audio.ndim == 2 and int(audio.shape[0]) > seq_len:
         audio = audio[-seq_len:]
 
-    num_quantizers = int(audio.shape[1]) if audio.ndim == 2 and audio.shape[1] > 0 else expected_num_quantizers
-    if num_quantizers != expected_num_quantizers:
-        raise ValueError(
-            f"Qwen3-TTS codec payload has {num_quantizers} groups; checkpoint requires {expected_num_quantizers}"
-        )
+    num_quantizers = int(audio.shape[1]) if audio.ndim == 2 and audio.shape[1] > 0 else _NUM_QUANTIZERS_DEFAULT
 
     # meta.ref_code_len — flat dotted then nested fallback.
     ref_code_len_raw = pooling_output.get("meta.ref_code_len")

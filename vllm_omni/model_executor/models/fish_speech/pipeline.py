@@ -14,12 +14,7 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageExecutionType,
     StagePipelineConfig,
-    get_required_config_field,
-    pipeline_cfg_resolver,
-    replace_stage_sampling_constraints,
 )
-
-from .configuration_fish_speech import FishSpeechConfig
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.fish_speech"
 
@@ -38,6 +33,8 @@ FISH_SPEECH_PIPELINE = PipelineConfig(
             async_chunk_process_next_stage_input_func=(f"{_PROC}.slow_ar_to_dac_decoder_async_chunk"),
             sampling_constraints={
                 "detokenize": False,
+                # <|im_end|> — stop when the model emits end-of-turn.
+                "stop_token_ids": [151645],
             },
         ),
         StagePipelineConfig(
@@ -53,21 +50,3 @@ FISH_SPEECH_PIPELINE = PipelineConfig(
         ),
     ),
 )
-
-
-@pipeline_cfg_resolver(
-    config_type=FishSpeechConfig,
-    default_pipeline_config=FISH_SPEECH_PIPELINE,
-)
-def resolve_fish_speech_pipeline(hf_config: FishSpeechConfig) -> PipelineConfig:
-    stop_token_id = get_required_config_field(
-        hf_config,
-        "im_end_token_id",
-        expected_type=int,
-        model="fish_speech",
-    )
-    return replace_stage_sampling_constraints(
-        FISH_SPEECH_PIPELINE,
-        stage_id=0,
-        updates={"stop_token_ids": [stop_token_id]},
-    )

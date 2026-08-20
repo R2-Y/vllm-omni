@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 CFG_TEXT_SUFFIX = "__cfg_text"
 
 
+# Fallback when stage config introspection fails; matches
+# llm_config.image_patch_token on the released Ming-flash-omni-2.0 checkpoint.
+_DEFAULT_IMAGE_PATCH_TOKEN_ID = 157157
+
+
 # Ming's byte5 glyph text is auto-extracted from the user prompt's quoted
 # spans (ASCII double quotes / Chinese curly quotes). Patterns and regex
 # taken verbatim from Ming ``processing_bailingmm2.py::get_text_from_prompt``.
@@ -181,14 +186,15 @@ def _resolve_image_patch_token_id(stage: Any) -> int:
     if isinstance(cached, int):
         return cached
 
+    token_id = _DEFAULT_IMAGE_PATCH_TOKEN_ID
     try:
         hf_config = stage.vllm_config.model_config.hf_config
         llm_config = getattr(hf_config, "llm_config", None)
-        token_id = getattr(llm_config, "image_patch_token")
-    except AttributeError as exc:
-        raise ValueError("Ming Flash Omni requires llm_config.image_patch_token") from exc
-    if isinstance(token_id, bool) or not isinstance(token_id, int):
-        raise ValueError("Ming Flash Omni requires integer llm_config.image_patch_token")
+        resolved = getattr(llm_config, "image_patch_token", None)
+        if isinstance(resolved, int):
+            token_id = resolved
+    except AttributeError:
+        pass
 
     try:
         stage._image_patch_token_id = token_id
@@ -296,12 +302,13 @@ def _slice_patch_hidden(
     return hidden
 
 
-def _resolve_token_ids_from_stage(
+def _resolve_token_ids_from_stage_or_defaults(
     stage: Any | None,
 ) -> tuple[int, int | None, int | None]:
     """Return (image_patch_token_id, image_end_token_id, num_query_tokens).
 
-    Read from the stage's HF config for the legacy stage-bound API.
+    Tries to read from the stage's HF config when available (old API).
+    Falls back to Ming-flash-omni-2.0 defaults when stage is None (new API).
     """
     if stage is not None:
         return (
@@ -309,17 +316,11 @@ def _resolve_token_ids_from_stage(
             _resolve_image_end_token_id(stage),
             _resolve_num_query_tokens(stage),
         )
-    raise ValueError("Ming Flash Omni token metadata requires a configured stage")
-
-
-def _resolve_token_metadata_from_output(output: Any) -> tuple[int, int, int]:
-    mm_out = getattr(output.outputs[0], "multimodal_output", None)
-    if not isinstance(mm_out, dict):
-        raise ValueError("Ming Flash Omni thinker output is missing multimodal token metadata")
-    values = tuple(mm_out.get(key) for key in ("image_patch_token_id", "image_end_token_id", "num_query_tokens"))
-    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
-        raise ValueError("Ming Flash Omni thinker output has invalid token metadata")
-    return values  # type: ignore[return-value]
+    # Defaults from Ming-flash-omni-2.0:
+    #   llm_config.image_patch_token = 157157
+    #   llm_config.image_end_token   = 157159
+    #   img_gen_scales=[16] -> 16*16 = 256 query tokens
+    return (_DEFAULT_IMAGE_PATCH_TOKEN_ID, 157159, 256)
 
 
 def _extract_byte5_from_sampling_params(sampling_params: Any) -> list[str] | None:
@@ -362,6 +363,8 @@ def thinker2imagegen(
     auto-extracted from quoted prompt text.
     """
     thinker_outputs = source_outputs
+    image_patch_token_id, image_end_token_id, num_query_tokens = _resolve_token_ids_from_stage_or_defaults(stage=None)
+
     parent_output = None
     negative_output = None
     for o in thinker_outputs:
@@ -374,7 +377,6 @@ def thinker2imagegen(
     if parent_output is None:
         logger.warning("[thinker2imagegen] no parent output in engine_outputs; skipping")
         return []
-    image_patch_token_id, image_end_token_id, num_query_tokens = _resolve_token_metadata_from_output(parent_output)
 
     parent_hidden = _slice_patch_hidden(
         parent_output,

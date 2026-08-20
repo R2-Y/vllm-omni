@@ -6,6 +6,7 @@ Directly inherits from vLLM's AsyncMPClient to reuse EngineCore architecture.
 
 from __future__ import annotations
 
+import inspect
 import os
 import socket
 from typing import TYPE_CHECKING, Any
@@ -28,9 +29,6 @@ from vllm_omni.distributed.omni_connectors.utils.kv_utils import kv_zmq_port
 from vllm_omni.engine import OmniEngineCoreOutput, OmniEngineCoreOutputs
 from vllm_omni.engine.stage_client import StageClientBase
 from vllm_omni.engine.stage_init_utils import StageMetadata
-from vllm_omni.engine.stage_input_processor_adapter import (
-    invoke_stage_input_processor,
-)
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutput
@@ -389,9 +387,6 @@ class StageEngineCoreClientBase(StageClientBase):
         source_outputs: list[Any],
         prompt: Any = None,
         streaming_context: Any | None = None,
-        sampling_params: Any | None = None,
-        source_sampling_params: Any | None = None,
-        target_sampling_params: Any | None = None,
     ) -> list[OmniTokensPrompt]:
         """Process inputs from upstream stages.
 
@@ -399,15 +394,18 @@ class StageEngineCoreClientBase(StageClientBase):
         and the original prompt.
         """
         if self.custom_process_input_func is not None:
-            return invoke_stage_input_processor(
-                self.custom_process_input_func,
+            signature = inspect.signature(self.custom_process_input_func)
+            if len(signature.parameters) >= 4:
+                return self.custom_process_input_func(
+                    source_outputs,
+                    prompt,
+                    self.requires_multimodal_data,
+                    streaming_context,
+                )
+            return self.custom_process_input_func(
                 source_outputs,
                 prompt,
                 self.requires_multimodal_data,
-                streaming_context=streaming_context,
-                sampling_params=sampling_params,
-                source_sampling_params=source_sampling_params,
-                target_sampling_params=target_sampling_params,
             )
 
         if not self.engine_input_source:

@@ -7,9 +7,7 @@ Stage 1: Talker   — text embeddings → speech tokens
 Stage 2: Code2Wav — speech tokens → audio waveform
 """
 
-from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
-    Qwen2_5OmniConfig,
-)
+from transformers import Qwen2_5OmniConfig
 
 from vllm_omni.config.stage_config import (
     PipelineConfig,
@@ -18,9 +16,7 @@ from vllm_omni.config.stage_config import (
     pipeline_cfg_resolver,
     replace_stage_sampling_constraints,
 )
-from vllm_omni.model_executor.models.qwen2_5_omni.runtime_config import (
-    resolve_qwen2_5_omni_runtime_config,
-)
+from vllm_omni.model_executor.config_contract import get_required_config_field
 
 _PROC = "vllm_omni.model_executor.stage_input_processors.qwen2_5_omni"
 
@@ -54,6 +50,7 @@ QWEN2_5_OMNI_PIPELINE = PipelineConfig(
             custom_process_next_stage_input_func=f"{_PROC}.talker2code2wav_full_payload",
             sampling_constraints={
                 "detokenize": True,
+                "stop_token_ids": [8294],
             },
         ),
         StagePipelineConfig(
@@ -79,14 +76,16 @@ QWEN2_5_OMNI_PIPELINE = PipelineConfig(
 def resolve_qwen2_5_omni_pipeline(
     hf_config: Qwen2_5OmniConfig,
 ) -> PipelineConfig:
-    runtime = resolve_qwen2_5_omni_runtime_config(hf_config)
+    stop_token_id = get_required_config_field(
+        hf_config,
+        "talker_config.tts_codec_end_token_id",
+        expected_type=int,
+        model="qwen2_5_omni",
+    )
     return replace_stage_sampling_constraints(
         QWEN2_5_OMNI_PIPELINE,
         stage_id=1,
-        updates={
-            "stop_token_ids": [runtime.codec_stop_token_id],
-            "extra_args": runtime.to_sampling_extra_args(),
-        },
+        updates={"stop_token_ids": [stop_token_id]},
     )
 
 

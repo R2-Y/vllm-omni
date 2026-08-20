@@ -12,13 +12,13 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 _GROUP = 4
 _AC = 8
-_EMPTY_TOKEN_ID = 555
 _FTP = 2 * 2 * 240  # frames_per_token from mocked tokenizer.config
 
 
 @functools.lru_cache(maxsize=1)
 def _mimo_code2wav_deps():
     """Defer mimo code2wav (pulls vLLM model_executor) until first use."""
+    from vllm_omni.model_executor.models.mimo_audio.config_mimo_audio import TALKER_CODEC_PAD_TOKEN_ID
     from vllm_omni.model_executor.models.mimo_audio.mimo_audio_code2wav import (
         AudioStreamerConfig,
         MiMoAudioToken2WavForConditionalGenerationVLLM,
@@ -26,7 +26,7 @@ def _mimo_code2wav_deps():
     )
 
     return (
-        _EMPTY_TOKEN_ID,
+        TALKER_CODEC_PAD_TOKEN_ID,
         AudioStreamerConfig,
         MiMoAudioToken2WavForConditionalGenerationVLLM,
         flat_codec_group_element_count,
@@ -43,10 +43,10 @@ def _codes_ns(empty: int = 555, eostm: int = 666):
 
 def _make_dummy_code_tensor() -> torch.Tensor:
     """Pad-only talker dummy; matches _check_dummy_code_tensor."""
-    empty_token_id, _, _, fcec = _mimo_code2wav_deps()
+    TALKER_CODEC_PAD_TOKEN_ID, _, _, fcec = _mimo_code2wav_deps()
     t = torch.zeros(fcec(_GROUP, _AC), dtype=torch.long)
     t = t.view(_GROUP, _AC + 1)
-    t[:, 0] = empty_token_id
+    t[:, 0] = TALKER_CODEC_PAD_TOKEN_ID
     return t.view(-1)
 
 
@@ -72,11 +72,7 @@ def _minimal_model(mocker: MockerFixture):
     _, AudioStreamerConfig, MiMoAudioToken2WavForConditionalGenerationVLLM, _ = _mimo_code2wav_deps()
     model = object.__new__(MiMoAudioToken2WavForConditionalGenerationVLLM)
     model.device = torch.device("cpu")
-    model.config = SimpleNamespace(
-        group_size=_GROUP,
-        audio_channels=_AC,
-        empty_token_id=_EMPTY_TOKEN_ID,
-    )
+    model.config = SimpleNamespace(group_size=_GROUP, audio_channels=_AC)
     model.streamer_config = AudioStreamerConfig(group_size=_GROUP, audio_channels=_AC)
     model.codes = _codes_ns()
 

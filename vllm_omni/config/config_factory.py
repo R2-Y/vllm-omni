@@ -223,11 +223,9 @@ class StageConfigFactory:
             if model_index and "_class_name" in model_index:
                 class_name = model_index["_class_name"]
                 for obj in OMNI_PIPELINES.values():
-                    pipeline_cfg = (
-                        getattr(obj, "default_pipeline_config", None)
-                        if callable(obj)
-                        else obj
-                    )
+                    # If we have a resolver, call it with the optional hf_config
+                    # to get the default pipeline config for this key
+                    pipeline_cfg = obj(hf_config) if callable(obj) else obj
                     if pipeline_cfg is not None and pipeline_cfg.diffusers_class_name == class_name:
                         logger.info(
                             "Detected pipeline %r from model_index.json (_class_name=%r)",
@@ -289,31 +287,10 @@ class StageConfigFactory:
             hf_archs = set(getattr(hf_config, "architectures", []) or [])
             if hf_archs:
                 for registered in OMNI_PIPELINES.values():
-                    resolved_from_legacy = False
-                    topology = (
-                        registered
-                        if isinstance(registered, PipelineConfig)
-                        else getattr(registered, "default_pipeline_config", None)
-                    )
-                    if topology is None and callable(registered):
-                        # Backward compatibility for out-of-tree resolvers
-                        # registered before topology metadata was available.
-                        # Failures are isolated so one unrelated resolver cannot
-                        # abort architecture discovery.
-                        try:
-                            topology = registered(hf_config)
-                            resolved_from_legacy = True
-                        except Exception:
-                            logger.debug(
-                                "Legacy pipeline resolver raised during architecture "
-                                "discovery; continuing fallback search.",
-                                exc_info=True,
-                            )
-                    if not isinstance(topology, PipelineConfig) or not hf_archs.intersection(
-                        topology.hf_architectures
-                    ):
+                    pipeline_cfg = registered if isinstance(registered, PipelineConfig) else registered(hf_config)
+                    if pipeline_cfg is None:
                         continue
-                    predicate = topology.hf_config_predicate
+                    predicate = pipeline_cfg.hf_config_predicate
                     if predicate is not None:
                         try:
                             if not predicate(hf_config):
@@ -321,24 +298,20 @@ class StageConfigFactory:
                                     "Pipeline %r matched on architectures %s but its "
                                     "hf_config_predicate rejected the loaded config; "
                                     "continuing fallback search.",
-                                    topology.model_type,
-                                    sorted(hf_archs.intersection(topology.hf_architectures)),
+                                    pipeline_cfg.model_type,
+                                    sorted(hf_archs.intersection(pipeline_cfg.hf_architectures)),
                                 )
                                 continue
                         except Exception:
                             logger.exception(
                                 "Pipeline %r hf_config_predicate raised; skipping.",
-                                topology.model_type,
+                                pipeline_cfg.model_type,
                             )
                             continue
-                    if callable(registered):
-                        if resolved_from_legacy:
-                            return topology
-                        pipeline_cfg = registered(hf_config)
-                        if pipeline_cfg is not None:
-                            return pipeline_cfg
-                    else:
-                        return topology
+                    if isinstance(pipeline_cfg, PipelineConfig) and hf_archs.intersection(
+                        pipeline_cfg.hf_architectures
+                    ):
+                        return pipeline_cfg
         return None
 
     @classmethod

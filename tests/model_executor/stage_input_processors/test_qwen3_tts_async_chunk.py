@@ -16,6 +16,7 @@ from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     ramp_cumulative,
 )
 from vllm_omni.model_executor.stage_input_processors.qwen3_tts import (
+    _NUM_QUANTIZERS_DEFAULT,
     _filter_audio_codes_qwen3_tts,
     talker2code2wav_async_chunk,
     talker2code2wav_full_payload,
@@ -28,19 +29,6 @@ _FRAME = [1, 2, 3, 4]
 _Q = len(_FRAME)
 
 
-def _sampling_params(q: int = _Q):
-    return SimpleNamespace(
-        extra_args={
-            "model_runtime": {
-                "qwen3_tts": {
-                    "num_code_groups": q,
-                    "codebook_size": 2048,
-                }
-            }
-        }
-    )
-
-
 def _req(rid, *, finished, initial_codec_chunk_frames=None):
     ai = None
     if initial_codec_chunk_frames is not None:
@@ -50,7 +38,6 @@ def _req(rid, *, finished, initial_codec_chunk_frames=None):
         external_req_id=rid,
         is_finished=lambda: finished,
         additional_information=ai,
-        sampling_params=_sampling_params(),
     )
 
 
@@ -59,7 +46,6 @@ def _tm(*, chunk_frames=25, left_context=25, max_num_seqs=1, initial_chunk_frame
         "codec_chunk_frames": chunk_frames,
         "codec_left_context_frames": left_context,
         "initial_codec_chunk_frames": initial_chunk_frames,
-        "ref_code_context_frames": left_context,
     }
     if chunk_ramp is not None:
         extra["codec_chunk_ramp"] = chunk_ramp
@@ -413,7 +399,7 @@ def test_non_async_token_only_sizes_placeholder_for_ref_and_audio_frames():
         cumulative_token_ids=list(range(3)),
     )
     stage = SimpleNamespace(
-        engine_outputs=[SimpleNamespace(outputs=[output], finished=True, sampling_params=_sampling_params())],
+        engine_outputs=[SimpleNamespace(outputs=[output], finished=True)],
     )
 
     prompts = talker2code2wav_token_only(stage.engine_outputs)
@@ -423,26 +409,6 @@ def test_non_async_token_only_sizes_placeholder_for_ref_and_audio_frames():
     assert prompt["additional_information"] == {"meta": {"left_context_size": 2}}
     # 2 ref frames + 2 valid audio frames (zero row filtered), 4 quantizers.
     assert prompt["prompt_token_ids"] == [0] * (_Q * (2 + 2))
-
-
-def test_non_async_token_only_uses_explicit_source_stage_runtime():
-    output = SimpleNamespace(
-        multimodal_output={
-            "codes": {
-                "audio": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
-            }
-        },
-        token_ids=[1, 2],
-        cumulative_token_ids=[1, 2],
-    )
-    source_output = SimpleNamespace(outputs=[output], finished=True)
-
-    prompts = talker2code2wav_token_only(
-        [source_output],
-        source_sampling_params=_sampling_params(),
-    )
-
-    assert prompts[0]["prompt_token_ids"] == [0] * _Q
 
 
 def test_full_payload_prepends_ref_code_and_flattens_codebook_major():
@@ -461,11 +427,7 @@ def test_full_payload_prepends_ref_code_and_flattens_codebook_major():
         "codes.ref": ref_code,
         "meta.ref_code_len": 2,
     }
-    request = SimpleNamespace(
-        request_id="r",
-        output_token_ids=list(range(3)),
-        sampling_params=_sampling_params(),
-    )
+    request = SimpleNamespace(request_id="r", output_token_ids=list(range(3)))
 
     payload = talker2code2wav_full_payload(transfer_manager=None, pooling_output=pooling_output, request=request)
 
@@ -509,7 +471,7 @@ def test_non_async_processor_filters_out_of_range_codec_values():
         cumulative_token_ids=list(range(4)),
     )
     stage = SimpleNamespace(
-        engine_outputs=[SimpleNamespace(outputs=[output], finished=True, sampling_params=_sampling_params())],
+        engine_outputs=[SimpleNamespace(outputs=[output], finished=True)],
     )
 
     prompts = talker2code2wav_token_only(stage.engine_outputs)
@@ -540,11 +502,7 @@ def test_full_payload_emits_left_context_size_for_ref_clone():
         "codes.ref": ref_code,
         "meta.ref_code_len": 2,
     }
-    request = SimpleNamespace(
-        request_id="r",
-        output_token_ids=list(range(4)),
-        sampling_params=_sampling_params(),
-    )  # seq_len=3
+    request = SimpleNamespace(request_id="r", output_token_ids=list(range(4)))  # seq_len=3
 
     payload = talker2code2wav_full_payload(transfer_manager=None, pooling_output=pooling_output, request=request)
 
@@ -561,11 +519,7 @@ def test_full_payload_omits_left_context_size_without_ref():
     ``left_context_size`` is emitted and Code2Wav trims nothing."""
     audio_codes = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.long)
     pooling_output = {"codes.audio": audio_codes}
-    request = SimpleNamespace(
-        request_id="r",
-        output_token_ids=list(range(3)),
-        sampling_params=_sampling_params(),
-    )  # seq_len=2
+    request = SimpleNamespace(request_id="r", output_token_ids=list(range(3)))  # seq_len=2
 
     payload = talker2code2wav_full_payload(transfer_manager=None, pooling_output=pooling_output, request=request)
 
@@ -601,11 +555,7 @@ def test_full_payload_emits_placeholder_frame_on_degenerate_take(pooling_output)
     frame that survives the codec validity filter, so the request runs the
     normal one-shot path and finishes cleanly.
     """
-    request = SimpleNamespace(
-        request_id="r",
-        output_token_ids=[0, 1, 2],
-        sampling_params=_sampling_params(),
-    )
+    request = SimpleNamespace(request_id="r", output_token_ids=[0, 1, 2])
 
     payload = talker2code2wav_full_payload(transfer_manager=None, pooling_output=pooling_output, request=request)
 
@@ -614,11 +564,11 @@ def test_full_payload_emits_placeholder_frame_on_degenerate_take(pooling_output)
     audio = payload["codes"]["audio"]
     # Same wire format as the normal path: flat, codebook-major, one frame.
     assert audio.ndim == 1
-    assert audio.numel() == _Q
+    assert audio.numel() == _NUM_QUANTIZERS_DEFAULT
     # The placeholder must survive the same validity filter real takes go
     # through; a frame the filter would drop re-creates the zero-token request.
-    frames = audio.reshape(-1, _Q)
-    assert int(_filter_audio_codes_qwen3_tts(frames, codebook_size=2048).shape[0]) >= 1
+    frames = audio.reshape(-1, _NUM_QUANTIZERS_DEFAULT)
+    assert int(_filter_audio_codes_qwen3_tts(frames).shape[0]) >= 1
 
 
 _RAMP = [1, 4, 8, 16, 25]

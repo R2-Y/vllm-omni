@@ -35,7 +35,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.data_entry_keys import OmniPayload
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.utils.speaker_cache import get_speaker_cache
@@ -150,13 +149,8 @@ class IndexTTS2TalkerForConditionalGeneration(nn.Module):
         self.number_mel_codes = gpt_cfg["number_mel_codes"]
         self.start_mel_token = gpt_cfg["start_mel_token"]
         self.stop_mel_token = gpt_cfg["stop_mel_token"]
-        self.start_text_token = gpt_cfg["start_text_token"]
-        self.stop_text_token = gpt_cfg["stop_text_token"]
-        try:
-            self.number_text_tokens = gpt_cfg["number_text_tokens"]
-            self.condition_num_latent = gpt_cfg["condition_num_latent"]
-        except KeyError as exc:
-            raise ValueError(f"IndexTTS2 config requires gpt.{exc.args[0]}") from exc
+        self.number_text_tokens = gpt_cfg.get("number_text_tokens", 12000)
+        self.condition_num_latent = gpt_cfg.get("condition_num_latent", 32)
 
         # --- Flags for vLLM-Omni framework ---
         self.have_multimodal_outputs = True
@@ -254,76 +248,33 @@ class IndexTTS2TalkerForConditionalGeneration(nn.Module):
         if self.conditioning_policy.uses_conformer_perceiver:
             self.conditioning_encoder = ConformerEncoder(
                 input_size=1024,
-                output_size=get_required_config_field(
-                    cond_cfg, "output_size", expected_type=int, model="indextts2"
-                ),
-                linear_units=get_required_config_field(
-                    cond_cfg, "linear_units", expected_type=int, model="indextts2"
-                ),
-                attention_heads=get_required_config_field(
-                    cond_cfg,
-                    "attention_heads",
-                    expected_type=int,
-                    model="indextts2",
-                ),
-                num_blocks=get_required_config_field(
-                    cond_cfg, "num_blocks", expected_type=int, model="indextts2"
-                ),
+                output_size=cond_cfg.get("output_size", 512),
+                linear_units=cond_cfg.get("linear_units", 2048),
+                attention_heads=cond_cfg.get("attention_heads", 8),
+                num_blocks=cond_cfg.get("num_blocks", 6),
                 input_layer=cond_cfg.get("input_layer", "conv2d2"),
             )
             self.perceiver_encoder = PerceiverResampler(
                 self.model_dim,
-                dim_context=get_required_config_field(
-                    cond_cfg, "output_size", expected_type=int, model="indextts2"
-                ),
-                ff_mult=get_required_config_field(
-                    cond_cfg, "perceiver_mult", expected_type=int, model="indextts2"
-                ),
-                heads=get_required_config_field(
-                    cond_cfg,
-                    "attention_heads",
-                    expected_type=int,
-                    model="indextts2",
-                ),
+                dim_context=cond_cfg.get("output_size", 512),
+                ff_mult=cond_cfg.get("perceiver_mult", 2),
+                heads=cond_cfg.get("attention_heads", 8),
                 num_latents=self.condition_num_latent,
             )
 
         self.emo_conditioning_encoder = ConformerEncoder(
             input_size=1024,
-            output_size=get_required_config_field(
-                emo_cond_cfg, "output_size", expected_type=int, model="indextts2"
-            ),
-            linear_units=get_required_config_field(
-                emo_cond_cfg, "linear_units", expected_type=int, model="indextts2"
-            ),
-            attention_heads=get_required_config_field(
-                emo_cond_cfg,
-                "attention_heads",
-                expected_type=int,
-                model="indextts2",
-            ),
-            num_blocks=get_required_config_field(
-                emo_cond_cfg, "num_blocks", expected_type=int, model="indextts2"
-            ),
+            output_size=emo_cond_cfg.get("output_size", 512),
+            linear_units=emo_cond_cfg.get("linear_units", 1024),
+            attention_heads=emo_cond_cfg.get("attention_heads", 4),
+            num_blocks=emo_cond_cfg.get("num_blocks", 4),
             input_layer=emo_cond_cfg.get("input_layer", "conv2d2"),
         )
         self.emo_perceiver_encoder = PerceiverResampler(
             1024,
-            dim_context=get_required_config_field(
-                emo_cond_cfg, "output_size", expected_type=int, model="indextts2"
-            ),
-            ff_mult=get_required_config_field(
-                emo_cond_cfg,
-                "perceiver_mult",
-                expected_type=int,
-                model="indextts2",
-            ),
-            heads=get_required_config_field(
-                emo_cond_cfg,
-                "attention_heads",
-                expected_type=int,
-                model="indextts2",
-            ),
+            dim_context=emo_cond_cfg.get("output_size", 512),
+            ff_mult=emo_cond_cfg.get("perceiver_mult", 2),
+            heads=emo_cond_cfg.get("attention_heads", 4),
             num_latents=1,
         )
 
@@ -499,10 +450,7 @@ class IndexTTS2TalkerForConditionalGeneration(nn.Module):
             # full-payload accumulator. Emit the policy on every step so the
             # final payload contract never depends on which decode row carried
             # the one-time conditioning tensors.
-            req_meta: dict[str, Any] = {
-                "use_gpt_latent": self.use_gpt_latent,
-                "stop_mel_token": self.stop_mel_token,
-            }
+            req_meta: dict[str, Any] = {"use_gpt_latent": self.use_gpt_latent}
             if mel_len == 1:
                 s_ref = info_meta.get("S_ref")
                 ref_mel = info_meta.get("ref_mel")
@@ -836,9 +784,7 @@ class IndexTTS2TalkerForConditionalGeneration(nn.Module):
     def _compute_mel_22k(self, wav_22k: torch.Tensor, device: torch.device) -> torch.Tensor:
         """Compute 80-band mel spectrogram at 22.05kHz for Stage 1."""
         s2mel_cfg = self.config.s2mel.get("preprocess_params", {})
-        if "sr" not in s2mel_cfg:
-            raise ValueError("IndexTTS2 config requires s2mel.preprocess_params.sr")
-        sr = s2mel_cfg["sr"]
+        sr = s2mel_cfg.get("sr", 22050)
         spect = s2mel_cfg.get("spect_params", {})
         n_fft = spect.get("n_fft", 1024)
         hop_length = spect.get("hop_length", 256)
@@ -1119,8 +1065,8 @@ class IndexTTS2TalkerForConditionalGeneration(nn.Module):
         text_normalization: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Tokenize text and add the checkpoint start/stop text tokens."""
-        start_text = self.start_text_token
-        stop_text = self.stop_text_token
+        start_text = 0
+        stop_text = 1
         lang_id: int | None = None
         if self.conditioning_policy.uses_language_embedding:
             from .text_processing_v2_5 import prepare_indextts25_text

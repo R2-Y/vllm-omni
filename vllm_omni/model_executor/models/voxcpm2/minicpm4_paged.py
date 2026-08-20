@@ -22,8 +22,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
 
-from vllm_omni.config.stage_config import get_required_config_field
-
 from .minicpm4_hf_compat import (
     _apply_rotary_pos_emb,
     _MiniCPMLongRoPE,
@@ -243,18 +241,8 @@ class MiniCPM4PagedForVoxCPM2(nn.Module):
                 hidden_size=hidden_size,
                 num_attention_heads=lm_cfg.num_attention_heads,
                 kv_channels=kv_channels,
-                rope_theta=get_required_config_field(
-                    lm_cfg,
-                    "rope_theta",
-                    expected_type=float,
-                    model="voxcpm2",
-                ),
-                max_position_embeddings=get_required_config_field(
-                    lm_cfg,
-                    "max_position_embeddings",
-                    expected_type=int,
-                    model="voxcpm2",
-                ),
+                rope_theta=getattr(lm_cfg, "rope_theta", 10000.0),
+                max_position_embeddings=getattr(lm_cfg, "max_position_embeddings", 32768),
                 rope_scaling=rope_scaling_dict,
             )
         else:
@@ -272,12 +260,7 @@ class MiniCPM4PagedForVoxCPM2(nn.Module):
                     layer_idx=i,
                     num_hidden_layers=num_hidden_layers,
                     use_mup=getattr(lm_cfg, "use_mup", False),
-                    scale_depth=get_required_config_field(
-                        lm_cfg,
-                        "scale_depth",
-                        expected_type=float,
-                        model="voxcpm2",
-                    ),
+                    scale_depth=getattr(lm_cfg, "scale_depth", 1.0),
                     cache_config=cache_config,
                     prefix=f"{prefix}.layers.{i}",
                 )
@@ -292,16 +275,7 @@ class MiniCPM4PagedForVoxCPM2(nn.Module):
         )
 
         use_mup = getattr(lm_cfg, "use_mup", False)
-        self._scale_emb = (
-            get_required_config_field(
-                lm_cfg,
-                "scale_emb",
-                expected_type=float,
-                model="voxcpm2",
-            )
-            if use_mup
-            else 1.0
-        )
+        self._scale_emb = getattr(lm_cfg, "scale_emb", 1.0) if use_mup else 1.0
         self._compiled_layers: set[int] = set()
 
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
@@ -395,12 +369,7 @@ class MiniCPM4PagedResidualLM(nn.Module):
         lm_cfg = _resolve_lm_cfg(config)
 
         hidden_size = lm_cfg.hidden_size
-        num_hidden_layers = get_required_config_field(
-            config,
-            "residual_lm_num_layers",
-            expected_type=int,
-            model="voxcpm2",
-        )
+        num_hidden_layers = getattr(config, "residual_lm_num_layers", 8)
         kv_channels = getattr(lm_cfg, "kv_channels", None)
 
         self.rope_emb = None
@@ -417,12 +386,7 @@ class MiniCPM4PagedResidualLM(nn.Module):
                     layer_idx=i,
                     num_hidden_layers=num_hidden_layers,
                     use_mup=getattr(lm_cfg, "use_mup", False),
-                    scale_depth=get_required_config_field(
-                        lm_cfg,
-                        "scale_depth",
-                        expected_type=float,
-                        model="voxcpm2",
-                    ),
+                    scale_depth=getattr(lm_cfg, "scale_depth", 1.0),
                     cache_config=cache_config,
                     prefix=f"{prefix}.layers.{i}",
                 )

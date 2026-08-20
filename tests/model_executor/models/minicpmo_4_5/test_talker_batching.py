@@ -11,9 +11,6 @@ import torch.nn as nn
 from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni import (
     MiniCPMO45OmniForConditionalGeneration,
 )
-from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import (
-    ConditionalChatTTSConfig,
-)
 from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import (
     _REPETITION_PENALTY_CHUNK_SIZE,
     MiniCPMO45OmniTTSForConditionalGeneration,
@@ -130,16 +127,7 @@ def test_audio_token_limit_scales_with_condition_length(
     condition_tokens: int,
     expected: int,
 ) -> None:
-    config = ConditionalChatTTSConfig()
-    assert (
-        _max_audio_tokens(
-            condition_tokens,
-            min_audio_tokens=config.min_audio_tokens,
-            max_audio_tokens=config.max_new_tokens,
-            audio_tokens_per_text_token=config.audio_tokens_per_text_token,
-        )
-        == expected
-    )
+    assert _max_audio_tokens(condition_tokens) == expected
 
 
 def test_weight_norm_restore_matches_checkpoint_parametrization_in_bfloat16() -> None:

@@ -7,19 +7,12 @@ from transformers.configuration_utils import PretrainedConfig
 class CosyVoice3Config(PretrainedConfig):
     model_type = "cosyvoice3"
 
-    def __init__(
-        self,
-        speech_token_size: int = 6561,
-        speech_stop_token_id: int = 6562,
-        **kwargs,
-    ):
+    def __init__(self, **kwargs):
         # Set primary speech EOS so vLLM stops generation at the right token.
         # The official CosyVoice3 treats ALL tokens >= speech_token_size
         # (6561-6760) as stop signals; see stop_token_ids in the YAML configs.
-        kwargs.setdefault("eos_token_id", speech_stop_token_id)
+        kwargs.setdefault("eos_token_id", 6562)
         super().__init__(**kwargs)
-        self.speech_token_size = speech_token_size
-        self.speech_stop_token_id = speech_stop_token_id
         self.sample_rate = 24000
         self.llm_input_size = 896
         self.llm_output_size = 896
@@ -61,8 +54,8 @@ class CosyVoice3Config(PretrainedConfig):
         self.llm = {
             "llm_input_size": self.llm_input_size,
             "llm_output_size": self.llm_output_size,
-            "speech_token_size": speech_token_size,
-            "eos_token_id": speech_stop_token_id,
+            "speech_token_size": 6561,
+            "eos_token_id": 6561 + 1,
             "length_normalized_loss": True,
             "lsm_weight": 0,
             "mix_ratio": [5, 15],

@@ -213,13 +213,12 @@ class IndexTTS2Adapter(ARTTSAdapter):
         )
 
         prompt_kwargs: dict[str, Any] = {}
-        hf_config = getattr(server.engine_client.model_config, "hf_config", None)
-        prompt_kwargs["hf_config"] = hf_config
         if self.name == "indextts2_5":
             from vllm_omni.model_executor.models.indextts2.tokenizer_v2_5 import (
                 INDEXTTS25_TOKENIZER_FILE,
             )
 
+            hf_config = getattr(server.engine_client.model_config, "hf_config", None)
             prompt_kwargs["tokenizer_file"] = getattr(
                 hf_config,
                 "tokenizer_file",

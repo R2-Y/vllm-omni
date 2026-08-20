@@ -12,7 +12,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.nn.utils import weight_norm
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.common.alias_free_activation import AliasFreeActivation1d
 from vllm_omni.model_executor.models.common.snake_activation import SnakeBeta
 
@@ -529,9 +528,7 @@ class Token2latentFlowMatching(nn.Module):
         self.token_input_dim = config.get("token_input_dim", self.model_dim)
         self.target_dim = config.z_dim
 
-        self.spkr_embed_dim = get_required_config_field(
-            config, "spkr_embed_dim", expected_type=int, model="covo_audio"
-        )
+        self.spkr_embed_dim = config.get("spkr_embed_dim", 512)
         self.cond_proj = Linear(self.model_dim + self.spkr_embed_dim, self.model_dim)
         self.token_pad_id = -1
         if config.upsample_factor > 1:
@@ -803,15 +800,8 @@ class Token2WavDecoder(nn.Module):
 
         self.token2latent = Token2latentFlowMatchingWithEmbed(config.token2latent)
 
-        self.upsample_factor = get_required_config_field(
-            self.token2latent.config,
-            "upsample_factor",
-            expected_type=int,
-            model="covo_audio",
-        )
-        self.wav_input_sr = get_required_config_field(
-            config, "wav_input_sr", expected_type=int, model="covo_audio"
-        )
+        self.upsample_factor = self.token2latent.config.get("upsample_factor", 1)
+        self.wav_input_sr = config.get("wav_input_sr", 24000)
 
         self.trainable_module = ["wavegan", "token2latent"]
 

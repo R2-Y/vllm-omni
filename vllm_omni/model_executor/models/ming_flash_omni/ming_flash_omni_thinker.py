@@ -63,7 +63,6 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.model_loader.weight_utils import resolve_model_to_local_path
 from vllm_omni.model_executor.models.output_templates import OmniOutput
@@ -237,12 +236,7 @@ class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmn
         video_width, video_height = 448, 448
         num_frames = 8
         audio_duration = 3.0  # seconds
-        sample_rate = get_required_config_field(
-            self.info.get_hf_config(),
-            "audio_config.sampling_rate",
-            expected_type=int,
-            model="ming_flash_omni",
-        )
+        sample_rate = 16000
 
         audio_length = int(audio_duration * sample_rate)
 
@@ -499,6 +493,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         is_image_gen = "image" in modalities or "img2img" in modalities
         if isinstance(prompt, str) and is_image_gen:
             from vllm_omni.model_executor.models.ming_flash_omni.prompt_utils import (
+                DEFAULT_NUM_QUERY_TOKENS,
                 maybe_expand_image_gen_prompt,
             )
 
@@ -509,13 +504,8 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                 prompt = "<IMAGE>" + prompt
 
             ig = getattr(self.info.ctx.model_config.hf_config, "image_gen_config", None)
-            num_query_tokens = get_required_config_field(
-                ig,
-                "num_query_tokens",
-                expected_type=int,
-                model="ming_flash_omni",
-            )
-            prompt = maybe_expand_image_gen_prompt(prompt, num_query_tokens=num_query_tokens)
+            num_query_tokens = getattr(ig, "num_query_tokens", DEFAULT_NUM_QUERY_TOKENS)
+            prompt = maybe_expand_image_gen_prompt(prompt, num_query_tokens=int(num_query_tokens))
 
         return super()._apply_hf_processor_main(
             prompt=prompt,
@@ -650,24 +640,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
         self.config = llm_config
         self.thinker_config = thinker_config
-        self.image_patch_token_id = get_required_config_field(
-            llm_config,
-            "image_patch_token",
-            expected_type=int,
-            model="ming_flash_omni",
-        )
-        self.image_end_token_id = get_required_config_field(
-            llm_config,
-            "image_end_token",
-            expected_type=int,
-            model="ming_flash_omni",
-        )
-        self.num_query_tokens = get_required_config_field(
-            thinker_config.image_gen_config,
-            "num_query_tokens",
-            expected_type=int,
-            model="ming_flash_omni",
-        )
         self.have_multimodal_outputs = True
 
         # Initialize LLM as a component
@@ -687,12 +659,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
             self.linear_proj = VisionProjector(
                 vision_dim=self.vision.image_emb_dim,
                 llm_dim=llm_config.hidden_size,
-                mlp_depth=get_required_config_field(
-                    thinker_config,
-                    "mlp_depth",
-                    expected_type=int,
-                    model="ming_flash_omni",
-                ),
+                mlp_depth=getattr(thinker_config, "mlp_depth", 2),
             )
         logger.info("Initialized MingVisionEncoder and VisionProjector")
 
@@ -706,24 +673,9 @@ class MingFlashOmniThinkerForConditionalGeneration(
             self.linear_proj_audio = AudioProjector(
                 audio_dim=self.audio.audio_emb_dim,
                 llm_dim=llm_config.hidden_size,
-                ds_kernel_size=get_required_config_field(
-                    audio_cfg,
-                    "ds_kernel_size",
-                    expected_type=int,
-                    model="ming_flash_omni",
-                ),
-                ds_stride=get_required_config_field(
-                    audio_cfg,
-                    "ds_stride",
-                    expected_type=int,
-                    model="ming_flash_omni",
-                ),
-                mlp_depth=get_required_config_field(
-                    thinker_config,
-                    "mlp_depth",
-                    expected_type=int,
-                    model="ming_flash_omni",
-                ),
+                ds_kernel_size=getattr(audio_cfg, "ds_kernel_size", 3),
+                ds_stride=getattr(audio_cfg, "ds_stride", 2),
+                mlp_depth=getattr(thinker_config, "mlp_depth", 1),
             )
         logger.info("Initialized WhisperAudioEncoder and AudioProjector")
 
@@ -1083,9 +1035,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
         # Capture embeddings for downstream stages
         multimodal_outputs = {
             "final_hidden_states": hidden_states,
-            "image_patch_token_id": self.image_patch_token_id,
-            "image_end_token_id": self.image_end_token_id,
-            "num_query_tokens": self.num_query_tokens,
         }
 
         return OmniOutput(
@@ -1162,12 +1111,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         """Compute M-RoPE input positions using mm_features directly."""
         llm_config = self.config
-        tokens_per_second = get_required_config_field(
-            llm_config,
-            "tokens_per_second",
-            expected_type=int,
-            model="ming_flash_omni",
-        )
+        tokens_per_second: int = getattr(llm_config, "tokens_per_second", 2)
         seq_len = len(input_tokens)
 
         llm_pos_ids_list: list[np.ndarray] = []

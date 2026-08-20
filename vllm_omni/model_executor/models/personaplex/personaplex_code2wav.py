@@ -38,7 +38,6 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 logger = init_logger(__name__)
@@ -89,24 +88,13 @@ class PersonaPlexCode2Wav(nn.Module):
         self.enable_update_additional_information = True
         self.requires_raw_input_tokens = True
 
-        mimi_cfg = self.config.mimi_config
+        mimi_cfg = getattr(self.config, "mimi_config", None)
         # Number of *active* codebooks Mimi decodes to PCM (cb 0..7).
-        self._num_codebooks = get_required_config_field(
-            mimi_cfg, "num_codebooks", expected_type=int, model="personaplex"
-        )
-        self._output_sample_rate = get_required_config_field(
-            mimi_cfg, "sample_rate", expected_type=int, model="personaplex"
-        )
-        self._samples_per_frame = get_required_config_field(
-            mimi_cfg, "samples_per_frame", expected_type=int, model="personaplex"
-        )
+        self._num_codebooks = int(getattr(mimi_cfg, "num_codebooks", 8))
+        self._output_sample_rate = int(getattr(mimi_cfg, "sample_rate", 24000))
+        self._samples_per_frame = int(getattr(mimi_cfg, "samples_per_frame", 1920))
         self._mimi_name = getattr(mimi_cfg, "mimi_name", None) or getattr(self.config, "mimi_name", None)
-        self._max_codec_sessions = get_required_config_field(
-            vllm_config.model_config,
-            "duplex_max_sessions",
-            expected_type=int,
-            model="personaplex",
-        )
+        self._max_codec_sessions = int(getattr(vllm_config.model_config, "duplex_max_sessions", 1))
 
         # The Mimi module is constructed in load_weights() (it owns its own
         # weight format) and assigned here so vLLM's memory profiler can see it.

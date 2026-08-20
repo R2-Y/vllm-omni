@@ -48,7 +48,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid
 from vllm.model_executor.models.utils import init_vllm_registered_model, maybe_prefix
 
-from vllm_omni.config.stage_config import get_required_config_field
 from vllm_omni.model_executor.models.nemotron_voicechat.runtime_info import (
     merge_runtime_info,
     require_request_id,
@@ -102,15 +101,10 @@ def compute_acoustic_frame_count(nemo_stt_cfg: dict[str, Any], num_samples: int)
     perception = nemo_stt_cfg.get("perception") or {}
     pre = perception.get("preprocessor") or {}
     encoder = perception.get("encoder") or {}
-    sample_rate = get_required_config_field(
-        pre, "sample_rate", expected_type=int, model="nemotron_voicechat"
-    )
-    window_stride = get_required_config_field(
-        pre, "window_stride", expected_type=float, model="nemotron_voicechat"
-    )
-    n_fft = get_required_config_field(
-        pre, "n_fft", expected_type=int, model="nemotron_voicechat"
-    )
+    sample_rate = int(pre.get("sample_rate", 16000))
+    window_stride = float(pre.get("window_stride", 0.01))
+    window_size = float(pre.get("window_size", 0.025))
+    n_fft = int(pre.get("n_fft") or 2 ** int(np.ceil(np.log2(window_size * sample_rate))))
     hop = int(window_stride * sample_rate)
     pad_amount = n_fft // 2 * 2  # torch.stft center padding on both sides
     mel_len = (num_samples + pad_amount - n_fft) // hop + 1
@@ -188,18 +182,8 @@ class NemotronVoiceChatThinkerForConditionalGeneration(nn.Module, HasInnerState,
             raise ValueError("NemotronVoiceChat checkpoint config lacks 'model.stt.model'; cannot build the thinker.")
         self.stt_cfg = stt_cfg
         text_cfg = config.get_text_config()
-        self._hidden = get_required_config_field(
-            text_cfg,
-            "hidden_size",
-            expected_type=int,
-            model="nemotron_voicechat",
-        )
-        self._vocab = get_required_config_field(
-            text_cfg,
-            "vocab_size",
-            expected_type=int,
-            model="nemotron_voicechat",
-        )
+        self._hidden = int(getattr(text_cfg, "hidden_size", 4480))
+        self._vocab = int(getattr(text_cfg, "vocab_size", 131072))
         self._dtype = getattr(vllm_config.model_config, "dtype", torch.bfloat16)
 
         # NemotronH backbone (+ lm_head) on vLLM native layers.
@@ -230,28 +214,9 @@ class NemotronVoiceChatThinkerForConditionalGeneration(nn.Module, HasInnerState,
         # AddFusion weights (the checkpoint uses fuse_method="add" defaults;
         # the same duplex_*_weight keys double as the fusion weights).
         use_function_head = bool(stt_cfg.get("use_function_head", True))
-        self._w_text = get_required_config_field(
-            stt_cfg,
-            "duplex_text_channel_weight",
-            expected_type=float,
-            model="nemotron_voicechat",
-        )
-        self._w_audio = get_required_config_field(
-            stt_cfg,
-            "duplex_user_channel_weight",
-            expected_type=float,
-            model="nemotron_voicechat",
-        )
-        self._w_func = (
-            get_required_config_field(
-                stt_cfg,
-                "duplex_function_channel_weight",
-                expected_type=float,
-                model="nemotron_voicechat",
-            )
-            if use_function_head
-            else 0.0
-        )
+        self._w_text = float(stt_cfg.get("duplex_text_channel_weight", 1.0))
+        self._w_audio = float(stt_cfg.get("duplex_user_channel_weight", 1.0))
+        self._w_func = float(stt_cfg.get("duplex_function_channel_weight", 1.0)) if use_function_head else 0.0
         self._use_function_head = use_function_head
         fuse_method = stt_cfg.get("fuse_method", "add") or "add"
         if fuse_method != "add":
@@ -277,12 +242,7 @@ class NemotronVoiceChatThinkerForConditionalGeneration(nn.Module, HasInnerState,
 
         # Stateful per-request execution is only validated at batch size 1
         # (the shipped offline scope); fail fast on silent multi-request use.
-        max_num_seqs = get_required_config_field(
-            vllm_config.scheduler_config,
-            "max_num_seqs",
-            expected_type=int,
-            model="nemotron_voicechat",
-        )
+        max_num_seqs = int(getattr(vllm_config.scheduler_config, "max_num_seqs", 1))
         if max_num_seqs != 1:
             raise NotImplementedError(
                 f"NemotronVoiceChat thinker supports max_num_seqs=1 only (got {max_num_seqs}); "
@@ -378,16 +338,8 @@ class NemotronVoiceChatThinkerForConditionalGeneration(nn.Module, HasInnerState,
         wav = torch.as_tensor(np.asarray(audio), dtype=torch.float32, device=device).reshape(-1)
         if wav.numel() == 0:
             raise ValueError("NemotronVoiceChat thinker received empty audio input.")
-        sr_value = info.get("nvc_sr")
-        if isinstance(sr_value, bool) or not isinstance(sr_value, int):
-            raise ValueError("Nemotron VoiceChat requires integer runtime nvc_sr")
-        sr = sr_value
-        expected_sr = get_required_config_field(
-            self.config,
-            "source_sample_rate",
-            expected_type=int,
-            model="nemotron_voicechat",
-        )
+        sr = int(info.get("nvc_sr", 16000))
+        expected_sr = int(getattr(self.config, "source_sample_rate", 16000))
         if sr != expected_sr:
             raise ValueError(
                 f"NemotronVoiceChat thinker expects {expected_sr} Hz audio, got {sr} Hz — "
