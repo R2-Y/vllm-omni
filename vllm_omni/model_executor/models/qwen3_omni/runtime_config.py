@@ -45,9 +45,6 @@ class Qwen3OmniRuntimeConfig:
     def to_sampling_extra_args(self) -> dict[str, dict[str, Any]]:
         return {_MODEL_RUNTIME_KEY: {_RUNTIME_NAMESPACE: asdict(self)}}
 
-    def to_payload_meta(self) -> dict[str, Any]:
-        return {_MODEL_RUNTIME_KEY: {_RUNTIME_NAMESPACE: asdict(self)}}
-
 
 def _runtime_namespace(
     container: Mapping[str, Any],

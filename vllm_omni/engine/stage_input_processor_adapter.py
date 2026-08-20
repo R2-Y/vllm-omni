@@ -4,9 +4,18 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import Callable
 from typing import Any
+
+
+@functools.cache
+def _processor_parameters(
+    processor: Callable[..., Any],
+) -> dict[str, inspect.Parameter]:
+    """Inspect a processor once instead of once per streamed chunk."""
+    return dict(inspect.signature(processor).parameters)
 
 
 def invoke_stage_input_processor(
@@ -21,22 +30,12 @@ def invoke_stage_input_processor(
     target_sampling_params: Any | None = None,
 ) -> Any:
     """Invoke a processor across legacy and sampling-aware signatures."""
-    parameters = inspect.signature(processor).parameters
-    has_varargs = any(
-        parameter.kind is inspect.Parameter.VAR_POSITIONAL
-        for parameter in parameters.values()
-    )
-    has_varkw = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
+    parameters = _processor_parameters(processor)
+    has_varargs = any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters.values())
+    has_varkw = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
     extra_args: list[Any] = []
     extra_kwargs: dict[str, Any] = {}
-    target_params = (
-        target_sampling_params
-        if target_sampling_params is not None
-        else sampling_params
-    )
+    target_params = target_sampling_params if target_sampling_params is not None else sampling_params
     supplied_values = {
         "streaming_context": streaming_context,
         "_streaming_context": streaming_context,
@@ -77,10 +76,7 @@ def invoke_stage_input_processor(
             break
 
     fourth = positional[3] if len(positional) >= 4 else None
-    if (
-        fourth is not None
-        and fourth.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-    ):
+    if fourth is not None and fourth.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
         if fourth.name in supplied_values:
             extra_kwargs[fourth.name] = supplied_values[fourth.name]
             handled.add(fourth.name)
@@ -100,11 +96,7 @@ def invoke_stage_input_processor(
             context_supplied = True
 
     declared_context_name = next(
-        (
-            name
-            for name in ("streaming_context", "_streaming_context")
-            if name in parameters
-        ),
+        (name for name in ("streaming_context", "_streaming_context") if name in parameters),
         None,
     )
     if not context_supplied and declared_context_name is not None:

@@ -27,13 +27,6 @@ _PROC = "vllm_omni.model_executor.stage_input_processors.cosyvoice3"
 COSYVOICE3_PIPELINE = PipelineConfig(
     model_type="cosyvoice3",
     default_deploy_config_name="cosyvoice3.yaml",
-    connector_extra_int_minimums=(
-        ("codec_chunk_frames", 1),
-        ("codec_vocab_size", 1),
-        ("codec_pre_lookahead_frames", 0),
-        ("codec_max_chunk_frames", 1),
-        ("codec_stream_scale_factor", 1),
-    ),
     model_arch="CosyVoice3Model",
     stages=(
         StagePipelineConfig(

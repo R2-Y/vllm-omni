@@ -21,12 +21,6 @@ _PROC = "vllm_omni.model_executor.stage_input_processors.qwen3_tts"
 QWEN3_TTS_PIPELINE = PipelineConfig(
     model_type="qwen3_tts",
     default_deploy_config_name="qwen3_tts.yaml",
-    connector_extra_int_minimums=(
-        ("codec_chunk_frames", 1),
-        ("codec_left_context_frames", 0),
-        ("initial_codec_chunk_frames", 0),
-        ("ref_code_context_frames", 0),
-    ),
     # Pipeline-level default; the code2wav stage overrides per-stage below.
     model_arch="Qwen3TTSTalkerForConditionalGeneration",
     stages=(

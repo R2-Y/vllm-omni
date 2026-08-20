@@ -24,9 +24,6 @@ class CovoAudioRuntimeConfig:
     def to_sampling_extra_args(self) -> dict[str, dict[str, Any]]:
         return {"model_runtime": {_NAMESPACE: asdict(self)}}
 
-    def to_payload_meta(self) -> dict[str, dict[str, Any]]:
-        return {"model_runtime": {_NAMESPACE: asdict(self)}}
-
 
 def resolve_covo_audio_runtime_config(config: CovoAudioConfig) -> CovoAudioRuntimeConfig:
     runtime = CovoAudioRuntimeConfig(
@@ -52,13 +49,9 @@ def resolve_covo_audio_runtime_config(config: CovoAudioConfig) -> CovoAudioRunti
     if runtime.audio_token_index < 0 or runtime.eos_token_id < 0:
         raise ValueError(f"Model {_MODEL!r} requires non-negative token IDs; got {runtime}")
     if runtime.eos_token_id >= runtime.audio_token_index:
-        raise ValueError(
-            f"Model {_MODEL!r} requires eos_token_id below audio_token_index; got {runtime}"
-        )
+        raise ValueError(f"Model {_MODEL!r} requires eos_token_id below audio_token_index; got {runtime}")
     if runtime.audio_token_index >= runtime.vocab_size:
-        raise ValueError(
-            f"Model {_MODEL!r} requires audio_token_index below vocab_size; got {runtime}"
-        )
+        raise ValueError(f"Model {_MODEL!r} requires audio_token_index below vocab_size; got {runtime}")
     return runtime
 
 

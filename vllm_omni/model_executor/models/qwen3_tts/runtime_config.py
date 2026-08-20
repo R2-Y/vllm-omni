@@ -33,9 +33,6 @@ class Qwen3TTSRuntimeConfig:
     def to_sampling_extra_args(self) -> dict[str, dict[str, Any]]:
         return {"model_runtime": {"qwen3_tts": asdict(self)}}
 
-    def to_payload_meta(self) -> dict[str, dict[str, Any]]:
-        return {"model_runtime": {"qwen3_tts": asdict(self)}}
-
 
 def qwen3_tts_runtime_from_sampling_params(sampling_params: Any) -> Mapping[str, Any]:
     extra_args = getattr(sampling_params, "extra_args", None)

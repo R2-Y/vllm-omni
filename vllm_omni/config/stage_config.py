@@ -262,11 +262,6 @@ class PipelineConfig:
     # Bundled deploy defaults for this concrete pipeline topology. The file is
     # loaded from vllm_omni/deploy; None uses DeployConfig defaults.
     default_deploy_config_name: str | None = None
-    # Model-owned connector values that must be present before stage startup.
-    # Each entry is checked in every configured connector's ``extra`` mapping.
-    required_connector_extra_fields: tuple[str, ...] = ()
-    # Inclusive minimum for strict integer connector fields.
-    connector_extra_int_minimums: tuple[tuple[str, int], ...] = ()
 
     def get_stage(self, stage_id: int) -> StagePipelineConfig | None:
         """Look up a stage by its ID."""
@@ -927,64 +922,10 @@ def _deep_merge_mapping(
     authoritative: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Merge nested mappings with ``authoritative`` values winning."""
-    merged = copy.deepcopy(dict(base))
-    for key, value in authoritative.items():
-        existing = merged.get(key)
-        if isinstance(existing, Mapping) and isinstance(value, Mapping):
-            merged[key] = _deep_merge_mapping(existing, value)
-        else:
-            merged[key] = copy.deepcopy(value)
-    return merged
-
-
-def _validate_connector_runtime_contract(
-    pipeline: PipelineConfig,
-    deploy: DeployConfig,
-) -> None:
-    required = pipeline.required_connector_extra_fields
-    minimums = dict(pipeline.connector_extra_int_minimums)
-    required = tuple(dict.fromkeys((*required, *minimums)))
-    if not required:
-        return
-    connectors = deploy.connectors or {}
-    active_connector_names: set[str] = set()
-    for stage in deploy.stages:
-        for stage_connectors in (stage.input_connectors, stage.output_connectors):
-            if isinstance(stage_connectors, Mapping):
-                active_connector_names.update(stage_connectors.values())
-    if not active_connector_names:
-        if not deploy.async_chunk:
-            return
-        raise ValueError(
-            f"Pipeline {pipeline.model_type!r} with async_chunk enabled requires "
-            f"an active connector with extra fields {required!r} before stage startup"
-        )
-    for connector_name in sorted(active_connector_names):
-        connector = connectors.get(connector_name)
-        if not isinstance(connector, Mapping):
-            raise ValueError(
-                f"Pipeline {pipeline.model_type!r} references active connector "
-                f"{connector_name!r}, but it is not defined"
-            )
-        extra = connector.get("extra", {}) if isinstance(connector, Mapping) else {}
-        for field_name in required:
-            if not isinstance(extra, Mapping) or field_name not in extra:
-                raise ValueError(
-                    f"Pipeline {pipeline.model_type!r} connector {connector_name!r} "
-                    f"requires extra field {field_name!r} before stage startup"
-                )
-            value = extra[field_name]
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise ValueError(
-                    f"Pipeline {pipeline.model_type!r} connector {connector_name!r} "
-                    f"requires integer extra field {field_name!r}; got {value!r}"
-                )
-            minimum = minimums.get(field_name)
-            if minimum is not None and value < minimum:
-                raise ValueError(
-                    f"Pipeline {pipeline.model_type!r} connector {connector_name!r} "
-                    f"requires extra field {field_name!r} >= {minimum}; got {value}"
-                )
+    return _get_recursively_merged_dict(
+        copy.deepcopy(dict(base)),
+        copy.deepcopy(dict(authoritative)),
+    )
 
 
 def merge_pipeline_deploy(
@@ -996,7 +937,6 @@ def merge_pipeline_deploy(
     if cli_overrides is None:
         cli_overrides = {}
 
-    _validate_connector_runtime_contract(pipeline, deploy)
     deploy = _apply_platform_overrides(deploy)
     deploy_by_id = {s.stage_id: s for s in deploy.stages}
 

@@ -31,9 +31,6 @@ class MiMoAudioRuntimeConfig:
     def to_sampling_extra_args(self) -> dict[str, dict[str, Any]]:
         return {"model_runtime": {_NAMESPACE: asdict(self)}}
 
-    def to_payload_meta(self) -> dict[str, dict[str, Any]]:
-        return {"model_runtime": {_NAMESPACE: asdict(self)}}
-
 
 def _required(config: object, field: str) -> int:
     return get_required_config_field(config, field, expected_type=int, model=_MODEL)
@@ -60,9 +57,7 @@ def resolve_mimo_audio_runtime_config(config: MiMoAudioConfig) -> MiMoAudioRunti
     if len(set(token_values.values())) != len(token_values):
         raise ValueError(f"Model {_MODEL!r} requires distinct special token IDs; got {token_values}")
     if runtime.vocab_size <= max(token_values.values()):
-        raise ValueError(
-            f"Model {_MODEL!r} requires special token IDs below vocab_size; got {values}"
-        )
+        raise ValueError(f"Model {_MODEL!r} requires special token IDs below vocab_size; got {values}")
     return runtime
 
 

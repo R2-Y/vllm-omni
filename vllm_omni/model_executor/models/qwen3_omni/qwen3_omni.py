@@ -532,7 +532,7 @@ class Qwen3OmniMoeForConditionalGeneration(
             # These will later be projected into talker text space by the talker stage.
             multimodal_outputs: OmniPayload = captured_layer_dict if captured_layer_dict is not None else {}
             if self.runtime_config is not None:
-                multimodal_outputs["meta"] = self.runtime_config.to_payload_meta()
+                multimodal_outputs["meta"] = self.runtime_config.to_sampling_extra_args()
             try:
                 thinker_tts_embeds = self.thinker.embed_input_ids(self.tts_tokens)  # [1,3,thinker_hidden]
                 if (
@@ -572,7 +572,7 @@ class Qwen3OmniMoeForConditionalGeneration(
             audio_codes = torch.cat(code_predictor_codes, dim=0)
             multimodal_outputs: OmniPayload = {
                 "codes": {"audio": audio_codes},
-                "meta": self._require_runtime_config().to_payload_meta(),
+                "meta": self._require_runtime_config().to_sampling_extra_args(),
             }
             span_len = audio_codes.shape[0]
             talker_hidden = talker_hidden[:span_len]

@@ -623,7 +623,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         span_len = int(audio_codes.shape[0])
         mm: OmniPayload = {
             "codes": {"audio": audio_codes},
-            "meta": self.runtime_config.to_payload_meta(),
+            "meta": self.runtime_config.to_sampling_extra_args(),
         }
         if ref_code_len_list:
             mm.setdefault("meta", {})["ref_code_len"] = torch.cat(ref_code_len_list, dim=0)[:span_len]

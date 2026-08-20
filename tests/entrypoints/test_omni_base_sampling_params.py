@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 from vllm.sampling_params import SamplingParams
 
@@ -24,7 +26,7 @@ def test_custom_sampling_params_preserve_internal_model_runtime_defaults():
             },
         )
     ]
-    omni.num_stages = 1
+    omni.engine = SimpleNamespace(num_stages=1)
     user = SamplingParams(
         temperature=0.2,
         extra_args={
