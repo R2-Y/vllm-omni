@@ -298,6 +298,7 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
         self.num_sample_rows: int | None = None
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
         self._speaker_cache = get_speaker_cache()
+        self._inline_reference_encoder_warmed = False
         self._tokenizer = None
 
     # ------------------------------------------------------------------
@@ -361,6 +362,15 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
             cached = self._speaker_cache.get(cache_key)
             if cached is not None:
                 return cached["ref_codes_fq"]
+            if not self._inline_reference_encoder_warmed:
+                # Do not retain the encoder's different first-pass codes.
+                encode_reference_audio_codes(
+                    self.model_path,
+                    wav_np,
+                    sample_rate,
+                    device=device,
+                ).cpu()
+                self._inline_reference_encoder_warmed = True
         codes = encode_reference_audio_codes(self.model_path, wav_np, sample_rate, device=device).cpu()
         self._speaker_cache.put(cache_key, {"ref_codes_fq": codes})
         return codes

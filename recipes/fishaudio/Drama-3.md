@@ -100,7 +100,11 @@ curl -X POST http://localhost:8091/v1/audio/speech \
 
 Repeated inline `ref_audio` automatically reuses its encoded DAC reference
 codes in the stage-0 worker. No request changes or voice registration are
-needed. The first use encodes the audio; later uses skip encoding while the
+needed. On the first inline miss in each worker, one encoder warmup is
+discarded before computing and caching the reference codes. This avoids
+retaining the different first-pass codes observed with a cold encoder. The
+first request pays for both passes; subsequent misses encode once, and hits
+skip encoding while the
 entry remains in the existing byte-bounded speaker LRU cache (512 MiB by
 default). Codes stay on CPU, and entries disappear when the worker restarts
 or the LRU evicts them.
