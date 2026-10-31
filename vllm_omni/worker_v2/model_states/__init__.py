@@ -44,6 +44,7 @@ def init_omni_model_state(
         isinstance(model_config, OmniModelConfig)
         and getattr(model_config, "is_hybrid", False) is True
         and not hasattr(model, "get_model_state_cls")
+        and not callable(getattr(type(model), "create_mrv2_model_state", None))
     ):
         # Upstream picks MambaHybridModelState for hybrid recurrent layers
         # (e.g. KDA); the Omni runner needs OmniModelState's lifecycle too.
