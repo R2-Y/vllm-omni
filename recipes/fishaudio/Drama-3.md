@@ -104,10 +104,9 @@ needed. On the first inline miss in each worker, one encoder warmup is
 discarded before computing and caching the reference codes. This avoids
 retaining the different first-pass codes observed with a cold encoder. The
 first request pays for both passes; subsequent misses encode once, and hits
-skip encoding while the
-entry remains in the existing byte-bounded speaker LRU cache (512 MiB by
-default). Codes stay on CPU, and entries disappear when the worker restarts
-or the LRU evicts them.
+skip encoding while the entry remains in the existing byte-bounded speaker
+LRU cache (512 MiB by default). Codes stay on CPU, and entries disappear when
+the worker restarts or the LRU evicts them.
 
 The content key includes the model path, sample rate, waveform shape and
 contiguous float32 samples. Changed audio, shape, rate or model path uses a
