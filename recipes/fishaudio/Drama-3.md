@@ -96,6 +96,27 @@ curl -X POST http://localhost:8091/v1/audio/speech \
     --output cloned.wav
 ```
 
+#### Reference audio cache
+
+Repeated inline `ref_audio` automatically reuses its encoded DAC reference
+codes in the stage-0 worker. No request changes or voice registration are
+needed. The first use encodes the audio; later uses skip encoding while the
+entry remains in the existing byte-bounded speaker LRU cache (512 MiB by
+default). Codes stay on CPU, and entries disappear when the worker restarts
+or the LRU evicts them.
+
+The content key includes the model path, sample rate, waveform shape and
+contiguous float32 samples. Changed audio, shape, rate or model path uses a
+separate entry. Named voices retain their name/generation cache, and
+`ref_audio_codes` still bypasses audio encoding. A new `ref_text` reuses the
+same codes and builds its own prompt; generated speech is never cached.
+
+Every inline request still uploads and resolves its audio. Cache hits save
+DAC reference encoding, not upload, prompt prefill, AR generation or speech
+decoding. Report cold-cache and warm-cache latency separately; unique
+references still pay the encoding cost. Cache reuse does not enable prefix
+caching.
+
 #### Event and emotion tags
 
 Non-verbal events and delivery are controlled only through the input text.

@@ -24,6 +24,7 @@ rows replay the backbone, tower and sampling as PIECEWISE graphs.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Iterable
 from typing import Any
@@ -348,9 +349,20 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
                 return cached["ref_codes_fq"]
         sample_rate = int(_first(info.get("ref_audio_sr")))
         wav_np = wav.cpu().numpy() if isinstance(wav, torch.Tensor) else np.asarray(wav, dtype=np.float32)
+        if cache_key is None:
+            wav_np = np.ascontiguousarray(wav_np, dtype=np.float32)
+            digest = hashlib.blake2b(digest_size=32)
+            digest.update(str((self.model_path, sample_rate, wav_np.shape)).encode())
+            digest.update(wav_np.tobytes())
+            cache_key = self._speaker_cache.make_cache_key(
+                digest.hexdigest(),
+                model_type="fish_omni_inline",
+            )
+            cached = self._speaker_cache.get(cache_key)
+            if cached is not None:
+                return cached["ref_codes_fq"]
         codes = encode_reference_audio_codes(self.model_path, wav_np, sample_rate, device=device).cpu()
-        if cache_key is not None:
-            self._speaker_cache.put(cache_key, {"ref_codes_fq": codes})
+        self._speaker_cache.put(cache_key, {"ref_codes_fq": codes})
         return codes
 
     def build_frames(self, info: dict[str, Any], device: torch.device) -> torch.Tensor:
