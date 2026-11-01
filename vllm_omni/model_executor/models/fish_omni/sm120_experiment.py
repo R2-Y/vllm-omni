@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Opt-in Drama 3 SM120 experiment, installed only in the isolated worktree."""
+"""Drama 3 SM120 single-row tower GEMM; packed quant tuning is excluded."""
 
 import os
 
@@ -54,44 +54,13 @@ def _dense_fake(x, weight, split):
 def _linear_forward(self, x):
     choices = {(2048, 2048): 4, (9216, 2048): 4, (12288, 2048): 4, (2048, 6144): 8}
     split = choices.get(tuple(self.weight.shape))
-    if x.ndim == 2 and x.dtype == torch.bfloat16 and split:
+    if x.ndim == 2 and x.dtype == torch.bfloat16 and self.bias is None and split:
         return dense_one(x, self.weight, split)
     return torch.nn.functional.linear(x, self.weight, self.bias)
 
 
 class Sm120Linear(torch.nn.Linear):
     forward = _linear_forward
-
-
-def _install_packed():
-    from vllm.model_executor.layers.fused_moe.experts import deep_gemm_moe
-    from vllm.model_executor.layers.quantization.utils import fp8_utils
-    original = fp8_utils.silu_mul_quant_fp8_packed_triton
-    seen = set()
-
-    def tuned(input, group_size=128, output_q=None, clamp_limit=None, alpha=1., beta=0.,
-              *, expert_ends=None, expert_alignment=0):
-        m, n = input.shape
-        # Actual SM120 legacy layout; tuning selected BM=2/4 warps only in
-        # the validated padded-row interval. Larger prefills had no gain.
-        if (n != 1024 or not 16384 <= m <= 32768 or group_size != 128
-                or expert_ends is not None or expert_alignment != 0):
-            return original(input, group_size, output_q, clamp_limit, alpha, beta,
-                            expert_ends=expert_ends, expert_alignment=expert_alignment)
-        if m not in seen:
-            logger.info("[SM120PackedLaunch] M=%s N=1024 BM=2 warps=4 legacy=true", m)
-            seen.add(m)
-        q = output_q if output_q is not None else torch.empty((m, 512), device=input.device, dtype=torch.float8_e4m3fn)
-        s = torch.empty((1, triton.cdiv(m, 4) * 4), device=input.device, dtype=torch.int32).T[:m]
-        fp8_utils._silu_mul_quant_fp8_packed_kernel[(1, min(triton.cdiv(m, 2), 4096))](
-            input, q, s, None, m, input.stride(0), q.stride(0), s.stride(1),
-            clamp_limit if clamp_limit is not None else 0., alpha, beta,
-            N=n, GROUPS_PER_ROW=4, PACKS_PER_ROW=1, fp8_min=-448., fp8_max=448.,
-            GROUP_SIZE=128, PACKS_PER_CTA=1, BLOCK_M=2, HAS_CLAMP=clamp_limit is not None,
-            EXPERT_ALIGNMENT=0, num_warps=4, num_stages=2)
-        return q, s
-
-    deep_gemm_moe.fused_silu_mul_fp8_quant_packed = tuned
 
 
 def _install_ranges(model):
@@ -117,18 +86,15 @@ def _install_ranges(model):
 def install(model):
     if torch.cuda.get_device_capability() != (12, 0):
         return
-    packed = os.getenv("DRAMA3_SM120_PACKED") == "1"
-    dense = os.getenv("DRAMA3_SM120_DENSE") == "1"
-    if packed or dense:
+    dense = os.getenv("DRAMA3_SM120_DENSE", "1") == "1"
+    if dense:
         # additional_config participates in VllmConfig.compute_hash and hence
         # in aot_compile_hash_factors. Runtime environment flags alone do not.
         config = model.vllm_config
         if not isinstance(config.additional_config, dict):
             raise TypeError("SM120 experiment requires dictionary additional_config")
-        config.additional_config["drama3_sm120"] = {"revision": 2, "packed": packed, "dense": dense}
-    if os.getenv("DRAMA3_SM120_PACKED") == "1":
-        _install_packed()
-    if os.getenv("DRAMA3_SM120_DENSE") == "1":
+        config.additional_config["drama3_sm120"] = {"revision": 3, "dense": True}
+    if dense:
         for name, module in model.named_modules():
             if name.startswith("tower_layers.") and isinstance(module, torch.nn.Linear):
                 module.__class__ = Sm120Linear
