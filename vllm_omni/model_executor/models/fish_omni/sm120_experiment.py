@@ -3,7 +3,6 @@
 """Opt-in Drama 3 SM120 experiment, installed only in the isolated worktree."""
 
 import os
-import types
 
 import torch
 import triton
@@ -126,8 +125,7 @@ def install(model):
         config = model.vllm_config
         if not isinstance(config.additional_config, dict):
             raise TypeError("SM120 experiment requires dictionary additional_config")
-        config.additional_config = dict(config.additional_config,
-            drama3_sm120={"revision": 2, "packed": packed, "dense": dense})
+        config.additional_config["drama3_sm120"] = {"revision": 2, "packed": packed, "dense": dense}
     if os.getenv("DRAMA3_SM120_PACKED") == "1":
         _install_packed()
     if os.getenv("DRAMA3_SM120_DENSE") == "1":
