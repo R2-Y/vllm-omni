@@ -8,6 +8,10 @@ import types
 import torch
 import triton
 import triton.language as tl
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+_dense_shapes = set()
 
 
 @triton.jit
@@ -31,6 +35,13 @@ def _dense(A, W, O, N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr):
 @torch.library.custom_op("drama3_sm120::dense", mutates_args=())
 def dense_one(x: torch.Tensor, weight: torch.Tensor, split: int) -> torch.Tensor:
     n, k = weight.shape
+    # Keep the batch dispatch INSIDE the opaque op. A Python M==1 branch in
+    # Linear.forward is specialized away when AOT first traces a large prefill.
+    if x.shape[0] != 1:
+        return torch.nn.functional.linear(x, weight)
+    if (n, k) not in _dense_shapes:
+        logger.info("[SM120DenseLaunch] M=1 N=%s K=%s split_k=%s", n, k, split)
+        _dense_shapes.add((n, k))
     partial = torch.empty((split, n), device=x.device, dtype=torch.float32)
     _dense[(triton.cdiv(n, 64), split)](x, weight, partial, n, k, split, num_warps=4)
     return partial.sum(0).to(x.dtype).unsqueeze(0)
@@ -44,15 +55,20 @@ def _dense_fake(x, weight, split):
 def _linear_forward(self, x):
     choices = {(2048, 2048): 4, (9216, 2048): 4, (12288, 2048): 4, (2048, 6144): 8}
     split = choices.get(tuple(self.weight.shape))
-    if x.ndim == 2 and x.shape[0] == 1 and x.dtype == torch.bfloat16 and split:
+    if x.ndim == 2 and x.dtype == torch.bfloat16 and split:
         return dense_one(x, self.weight, split)
     return torch.nn.functional.linear(x, self.weight, self.bias)
+
+
+class Sm120Linear(torch.nn.Linear):
+    forward = _linear_forward
 
 
 def _install_packed():
     from vllm.model_executor.layers.fused_moe.experts import deep_gemm_moe
     from vllm.model_executor.layers.quantization.utils import fp8_utils
     original = fp8_utils.silu_mul_quant_fp8_packed_triton
+    seen = set()
 
     def tuned(input, group_size=128, output_q=None, clamp_limit=None, alpha=1., beta=0.,
               *, expert_ends=None, expert_alignment=0):
@@ -63,6 +79,9 @@ def _install_packed():
                 or expert_ends is not None or expert_alignment != 0):
             return original(input, group_size, output_q, clamp_limit, alpha, beta,
                             expert_ends=expert_ends, expert_alignment=expert_alignment)
+        if m not in seen:
+            logger.info("[SM120PackedLaunch] M=%s N=1024 BM=2 warps=4 legacy=true", m)
+            seen.add(m)
         q = output_q if output_q is not None else torch.empty((m, 512), device=input.device, dtype=torch.float8_e4m3fn)
         s = torch.empty((1, triton.cdiv(m, 4) * 4), device=input.device, dtype=torch.int32).T[:m]
         fp8_utils._silu_mul_quant_fp8_packed_kernel[(1, min(triton.cdiv(m, 2), 4096))](
@@ -99,11 +118,21 @@ def _install_ranges(model):
 def install(model):
     if torch.cuda.get_device_capability() != (12, 0):
         return
+    packed = os.getenv("DRAMA3_SM120_PACKED") == "1"
+    dense = os.getenv("DRAMA3_SM120_DENSE") == "1"
+    if packed or dense:
+        # additional_config participates in VllmConfig.compute_hash and hence
+        # in aot_compile_hash_factors. Runtime environment flags alone do not.
+        config = model.vllm_config
+        if not isinstance(config.additional_config, dict):
+            raise TypeError("SM120 experiment requires dictionary additional_config")
+        config.additional_config = dict(config.additional_config,
+            drama3_sm120={"revision": 2, "packed": packed, "dense": dense})
     if os.getenv("DRAMA3_SM120_PACKED") == "1":
         _install_packed()
     if os.getenv("DRAMA3_SM120_DENSE") == "1":
         for name, module in model.named_modules():
             if name.startswith("tower_layers.") and isinstance(module, torch.nn.Linear):
-                module.forward = types.MethodType(_linear_forward, module)
+                module.__class__ = Sm120Linear
     if os.getenv("DRAMA3_SM120_NVTX") == "1":
         _install_ranges(model)
