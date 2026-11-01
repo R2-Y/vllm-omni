@@ -55,6 +55,18 @@ def _install_packed():
     def tuned(input, group_size=128, output_q=None, clamp_limit=None, alpha=1., beta=0.,
               *, expert_ends=None, expert_alignment=0):
         m, n = input.shape
+        if n == 1024 and m >= 16384 and group_size == 128 and expert_ends is None and expert_alignment == 0:
+            # SM120 uses legacy grouped layout, not the prefix-sum layout used
+            # by SM90/SM100. Tune its dense padded workspace independently.
+            q = output_q if output_q is not None else torch.empty((m, 512), device=input.device, dtype=torch.float8_e4m3fn)
+            s = torch.empty((1, triton.cdiv(m, 4) * 4), device=input.device, dtype=torch.int32).T[:m]
+            fp8_utils._silu_mul_quant_fp8_packed_kernel[(1, min(triton.cdiv(m, 8), 4096))](
+                input, q, s, None, m, input.stride(0), q.stride(0), s.stride(1),
+                clamp_limit if clamp_limit is not None else 0., alpha, beta,
+                N=n, GROUPS_PER_ROW=4, PACKS_PER_ROW=1, fp8_min=-448., fp8_max=448.,
+                GROUP_SIZE=128, PACKS_PER_CTA=1, BLOCK_M=8, HAS_CLAMP=clamp_limit is not None,
+                EXPERT_ALIGNMENT=0, num_warps=8, num_stages=2)
+            return q, s
         if (n != 1024 or m < 20000 or group_size != 128 or expert_alignment != 128
                 or expert_ends is None or expert_ends.numel() != 256):
             return original(input, group_size, output_q, clamp_limit, alpha, beta,
