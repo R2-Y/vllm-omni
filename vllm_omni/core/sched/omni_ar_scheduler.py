@@ -1235,6 +1235,26 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                 omits_chunk_transfer = self._request_omits_chunk_transfer_to_next_stage(request)
             # Capture before resumable stop handling can clear token history.
             num_generation_tokens = _num_generation_tokens(request)
+            # Experiment-only: measure accepted semantic tokens before client
+            # output coalescing, which otherwise turns native TPOT into zero.
+            if not hasattr(self, "_sm120_token_timing"):
+                self._sm120_token_timing = {}
+            if new_token_ids:
+                stamp = time.perf_counter_ns()
+                if req_id not in self._sm120_token_timing:
+                    self._sm120_token_timing[req_id] = [stamp, stamp, len(new_token_ids),
+                        max(0.0, (time.time() - request.arrival_time) * 1000.0)]
+                else:
+                    timing = self._sm120_token_timing[req_id]
+                    timing[1] = stamp
+                    timing[2] += len(new_token_ids)
+            if stopped and req_id in self._sm120_token_timing:
+                first, last, count, ttft = self._sm120_token_timing.pop(req_id)
+                tpot = (last - first) / 1e6 / (count - 1) if count > 1 else 0.0
+                logger.info(
+                    "[SM120SchedulerTokens] finished_perf_ns=%s request=%s ttft_ms=%s tpot_ms=%s tokens=%s",
+                    time.perf_counter_ns(), req_id, ttft, tpot, count,
+                )
             if stopped:
                 if self.chunk_transfer_adapter is not None:
                     confirmed_num_computed_tokens = self.chunk_transfer_adapter._confirmed_num_computed_tokens(request)
