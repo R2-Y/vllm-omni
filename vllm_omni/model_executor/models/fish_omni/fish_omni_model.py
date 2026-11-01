@@ -301,6 +301,9 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
         self._inline_reference_encoder_warmed = False
         self._tokenizer = None
 
+        from .sm120_experiment import install
+        install(self)
+
     # ------------------------------------------------------------------
     # vLLM hybrid-model contract (delegated to the Qwen3.5 backbone).
     # ------------------------------------------------------------------

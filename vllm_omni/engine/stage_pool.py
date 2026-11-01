@@ -713,6 +713,10 @@ class StagePool:
             if callable(pop_native_text_metrics):
                 native_text_metrics = pop_native_text_metrics(request_id)
         native_generation_tokens = native_text_metrics.get("num_generation_tokens")
+        if self.stage_id == 0:
+            logger.info("[SM120TokenMetrics] request=%s ttft_ms=%s tpot_ms=%s tokens=%s",
+                        request_id, native_text_metrics.get("vllm_ttft_ms"),
+                        native_text_metrics.get("vllm_tpot_ms"), native_generation_tokens)
         finish_reason = next(
             (
                 str(reason)
