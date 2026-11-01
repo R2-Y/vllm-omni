@@ -17,12 +17,13 @@ def _dense(A, W, O, N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr):
     mi = tl.arange(0, 16)
     acc = tl.full((16, 64), 0, tl.float32)
     for _ in range(tl.cdiv(K, SK * 64)):
-        a = tl.load(A + ki[None, :], (mi[:, None] == 0) & (ki[None, :] < K), 0)
+        a = tl.load(A + mi[:, None] * K + ki[None, :], (mi[:, None] == 0) & (ki[None, :] < K), 0)
         w = tl.load(W + ni[None, :] * K + ki[:, None],
                     (ni[None, :] < N) & (ki[:, None] < K), 0)
         acc += tl.dot(a, w)
         ki += 64
-    tl.store(O + split * N + ni[None, :], acc, (mi[:, None] == 0) & (ni[None, :] < N))
+    tl.store(O + split * N + mi[:, None] * N + ni[None, :], acc,
+             (mi[:, None] == 0) & (ni[None, :] < N))
 
 
 @torch.library.custom_op("drama3_sm120::dense", mutates_args=())
