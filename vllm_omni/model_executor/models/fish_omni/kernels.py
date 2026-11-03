@@ -322,6 +322,7 @@ def _draw_kernel(
     BLOCK_V: tl.constexpr,
     K: tl.constexpr,
     HAS_MAP: tl.constexpr,
+    KEEP_TOP_P_CROSSING_TOKEN: tl.constexpr,
 ):
     row = tl.program_id(0)
     temperature = tl.maximum(tl.load(temperature_ptr + row), min_temperature)
@@ -335,6 +336,8 @@ def _draw_kernel(
     ids = tl.load(top_ids_ptr + row * top_stride + ranks)
     probs = tl.exp(values - row_max) / total
     cumulative = tl.cumsum(probs, axis=0)
+    if KEEP_TOP_P_CROSSING_TOKEN:
+        cumulative = tl.gather(cumulative, tl.maximum(ranks - 1, 0), axis=0)
     keep = ((cumulative <= tl.load(top_p_ptr + row)) & (ranks < tl.load(top_k_ptr + row))) | (ranks == 0)
     noise = -tl.log(tl.maximum(tl.load(noise_ptr + row * noise_stride + ranks), 1e-30))
     score = tl.where(keep, probs / noise, -1.0)
@@ -355,11 +358,13 @@ def draw_top_k_top_p(
     id_map: torch.Tensor | None = None,
     top: tuple[torch.Tensor, torch.Tensor] | None = None,
     min_temperature: float = 1e-5,
+    keep_top_p_crossing_token: bool = False,
 ) -> torch.Tensor:
     """Sample one index per row in fp32, top-k capped at ``max_top_k``.
 
     Ranks ``>= top_k`` and candidates whose inclusive cumulative probability
-    exceeds ``top_p`` (over the whole row's distribution) are dropped; rank 0 is
+    exceeds ``top_p`` (over the whole row's distribution) are dropped unless
+    ``keep_top_p_crossing_token`` retains the crossing candidate. Rank 0 is
     always kept, so a temperature at ``min_temperature`` takes the argmax.
     ``uniform`` is ``[rows, >= max_top_k]`` U(0, 1) noise; ``top`` reuses a
     ``torch.topk(logits, max_top_k)`` result shared by several draws; ``id_map``
@@ -371,7 +376,16 @@ def draw_top_k_top_p(
         return out
     if not _triton_device(logits):
         return _eager_draw_top_k_top_p(
-            logits, temperature, top_k, top_p, uniform, max_top_k, id_map, top, min_temperature
+            logits,
+            temperature,
+            top_k,
+            top_p,
+            uniform,
+            max_top_k,
+            id_map,
+            top,
+            min_temperature,
+            keep_top_p_crossing_token,
         )
     if top is None:
         top = torch.topk(logits, max_top_k, dim=-1)
@@ -394,6 +408,7 @@ def draw_top_k_top_p(
         BLOCK_V=triton.next_power_of_2(vocab),
         K=max_top_k,
         HAS_MAP=id_map is not None,
+        KEEP_TOP_P_CROSSING_TOKEN=keep_top_p_crossing_token,
         num_warps=8,
     )
     return out
@@ -468,6 +483,7 @@ def _eager_draw_top_k_top_p(
     id_map: torch.Tensor | None,
     top: tuple[torch.Tensor, torch.Tensor] | None,
     min_temperature: float,
+    keep_top_p_crossing_token: bool = False,
 ) -> torch.Tensor:
     scaled_temperature = temperature.float().clamp_min(min_temperature).unsqueeze(-1)
     logits_f = logits.float() / scaled_temperature
@@ -479,6 +495,8 @@ def _eager_draw_top_k_top_p(
         values, ids = top
     probs = torch.exp(values.float() / scaled_temperature - row_max) / total
     cumulative = torch.cumsum(probs, dim=-1)
+    if keep_top_p_crossing_token:
+        cumulative = torch.cat((torch.zeros_like(cumulative[:, :1]), cumulative[:, :-1]), dim=-1)
     ranks = torch.arange(max_top_k, device=logits.device)
     keep = ((cumulative <= top_p.float().unsqueeze(-1)) & (ranks < top_k.unsqueeze(-1))) | (ranks == 0)
     noise = -torch.log(uniform[:, :max_top_k].clamp_min(1e-30))

@@ -57,8 +57,18 @@ class FusedFrameSampler:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         rows = candidate_logits.shape[0]
         top = torch.topk(candidate_logits, self.max_top_k, dim=-1)
+        # Semantic nucleus sampling retains the crossing candidate, including
+        # EOS. Acoustic heads keep their exclusive boundary in code().
         first = draw_top_k_top_p(
-            candidate_logits, temperature, top_k, top_p, noise[:, 0], self.max_top_k, candidate_ids, top
+            candidate_logits,
+            temperature,
+            top_k,
+            top_p,
+            noise[:, 0],
+            self.max_top_k,
+            candidate_ids,
+            top,
+            keep_top_p_crossing_token=True,
         )
         ras = draw_top_k_top_p(
             candidate_logits,
@@ -69,6 +79,7 @@ class FusedFrameSampler:
             self.max_top_k,
             candidate_ids,
             top,
+            keep_top_p_crossing_token=True,
         )
         is_repeat = (ras_window == first.unsqueeze(-1)).any(dim=-1)
         is_semantic = (first >= semantic_begin_id) & (first < semantic_begin_id + codebook_size)

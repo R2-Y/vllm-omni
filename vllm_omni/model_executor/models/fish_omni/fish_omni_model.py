@@ -8,7 +8,7 @@ Runs on Model Runner V2. One forward samples one whole audio frame per request:
    Qwen3.5 MoE: gated delta net + full attention, block-FP8 routed experts) as
    ``(E_lm[main] + E_cb[c1]) / sqrt(2)`` (semantic rows) or ``E_lm[main]``.
 2. The backbone's final hidden state of each request's last row gives the
-   logits of end-of-speech and semantic tokens 1..4095 only (the lm_head is
+   logits of end-of-speech and semantic tokens 0..4095 only (the lm_head is
    sliced to those rows; see ``main_candidate_ids``), and a repetition-aware
    draw picks the main token (= code 0).
 3. The 13 codebook-tower layers run over every row of the batch. Prompt rows
@@ -91,12 +91,8 @@ def max_top_k(config: Any, codebook_size: int) -> int:
 
 
 def main_candidate_ids(eos_token_id: int, semantic_begin_id: int, semantic_end_id: int) -> list[int]:
-    """Token ids the main token is drawn from: end of speech and semantic codes 1..end.
-
-    Semantic code 0 is left out, which is the same as a -inf logit bias on it:
-    it is not a speech code, but the checkpoint still samples it occasionally.
-    """
-    return sorted({eos_token_id, *range(semantic_begin_id + 1, semantic_end_id + 1)})
+    """End of speech and the complete semantic codebook, including code 0."""
+    return sorted({eos_token_id, *range(semantic_begin_id, semantic_end_id + 1)})
 
 
 def _full_cudagraph() -> bool:

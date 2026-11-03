@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from vllm_omni.model_executor.models.fish_speech.dac_utils import (
     DAC_SAMPLE_RATE,
@@ -53,7 +54,11 @@ def _load_dac_codec(
             f"codec.pth not found for {model_path}. Required for voice cloning with Fish Speech S2 Pro."
         )
 
-    codec = build_dac_codec()
+    # vLLM loads AR weights under its model dtype. Construct the codec in
+    # FP32 so load_state_dict cannot round its FP32 checkpoint through BF16/FP16
+    # before the requested runtime conversion below.
+    with set_default_torch_dtype(torch.float32):
+        codec = build_dac_codec()
 
     state_dict = torch.load(codec_path, map_location="cpu", weights_only=True)
     if "generator" in state_dict:

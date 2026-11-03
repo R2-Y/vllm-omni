@@ -31,7 +31,7 @@ ROWS = 2000
 MAX_TOP_K = 32
 CANDIDATES = torch.tensor([EOS, *range(SEMANTIC_BEGIN, SEMANTIC_BEGIN + CODEBOOK_SIZE)])
 # Near-tied candidates: the arg-max semantic token, end of speech, and two more
-# semantic tokens; top_p 0.95 drops the last of them.
+# semantic tokens, spanning the semantic nucleus boundary.
 ARGMAX, OTHER_A, OTHER_B = SEMANTIC_BEGIN + 1, SEMANTIC_BEGIN + 2, SEMANTIC_BEGIN + 3
 
 
@@ -140,3 +140,50 @@ def test_end_of_speech_is_never_redrawn():
 def test_repeat_outside_window_keeps_first_draw():
     tokens, _ = _sample(_logits(ARGMAX, OTHER_A), history=[ARGMAX] + [OTHER_B] * RAS_WINDOW_FRAMES)
     assert bool((tokens == ARGMAX).all())
+
+
+def _sample_boundary(probabilities, *, top_k, top_p, repeated, draw):
+    sampler, noise = _sampler(rows=1)
+    noise.fill_(1e-20)
+    noise[0, draw, 1] = 0.9999
+    logits = torch.full((1, CANDIDATES.numel()), -80.0, device="cuda")
+    columns = {int(token): index for index, token in enumerate(CANDIDATES)}
+    for token, probability in zip((ARGMAX, EOS, OTHER_A), probabilities):
+        logits[0, columns[token]] = math.log(probability)
+    history = torch.full((1, RAS_WINDOW_FRAMES), ARGMAX if repeated else EMPTY_RAS_SLOT, device="cuda")
+    return sampler.main_tokens(
+        logits,
+        CANDIDATES.cuda(),
+        history,
+        _rows(1.0, rows=1),
+        _rows(top_k, torch.long, rows=1),
+        _rows(top_p, rows=1),
+        noise,
+        SEMANTIC_BEGIN,
+        CODEBOOK_SIZE,
+    )[0]
+
+
+def test_first_draw_keeps_eos_crossing_top_p():
+    tokens = _sample_boundary((0.55, 0.35, 0.10), top_k=30, top_p=0.6, repeated=False, draw=0)
+    assert tokens.item() == EOS
+
+
+def test_ras_keeps_eos_crossing_top_p():
+    tokens = _sample_boundary((0.90, 0.06, 0.04), top_k=1, top_p=1.0, repeated=True, draw=1)
+    assert tokens.item() == EOS
+
+
+def test_semantic_crossing_policy_still_respects_top_k():
+    tokens = _sample_boundary((0.55, 0.35, 0.10), top_k=1, top_p=0.6, repeated=False, draw=0)
+    assert tokens.item() == ARGMAX
+
+
+def test_acoustic_head_still_excludes_crossing_token():
+    sampler, noise = _sampler(rows=1)
+    noise.fill_(1e-20)
+    noise[0, sampler.NUM_DRAWS_EXTRA, 1] = 0.9999
+    logits = torch.full((1, 64), -80.0, device="cuda")
+    logits[0, :3] = torch.tensor([math.log(p) for p in (0.55, 0.35, 0.10)], device="cuda")
+    token = sampler.code(logits, _rows(1.0, rows=1), _rows(30, torch.long, rows=1), _rows(0.6, rows=1), noise, 0)
+    assert token.item() == 0
