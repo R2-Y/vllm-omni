@@ -15,7 +15,24 @@ import torch
 
 TTS_INSTRUCTION = "convert the provided text to speech"
 REFERENCE_INSTRUCTION = "convert the provided text to speech reference to the following:"
-_SPEAKER_TAG = re.compile(r"\s*<\|speaker:(\d+)\|>")
+_SPEAKER_TAG = re.compile(r"<\|speaker:([0-9]+)\|>")
+_SPEAKER_IDS = frozenset(str(speaker_id) for speaker_id in range(16))
+_STRUCTURAL_TOKENS = ("<|im_start|>", "<|im_end|>", "<|voice|>", "<|text|>", "<|interleave|>", "<|semantic:")
+# Match the native builder's Unicode White_Space set, excluding U+001C..U+001F.
+_WHITE_SPACE = "".join(map(chr, (*range(9, 14), 32, 133, 160, 5760, *range(8192, 8203), 8232, 8233, 8239, 8287, 12288)))
+
+
+def _validate_text(text: str, location: str) -> None:
+    if not text.strip(_WHITE_SPACE):
+        raise ValueError(f"{location}: text must not be empty")
+    for token in _STRUCTURAL_TOKENS:
+        if token in text:
+            raise ValueError(f"{location}: {token} is written by the prompt builder")
+    for marker in re.finditer(r"<\|speaker", text):
+        tag = _SPEAKER_TAG.match(text, marker.start())
+        digits = tag.group(1) if tag else ""
+        if digits not in _SPEAKER_IDS:
+            raise ValueError(f"{location}: speaker tags must be <|speaker:0|> to <|speaker:15|>")
 
 
 @dataclass(frozen=True)
@@ -26,20 +43,25 @@ class Reference:
 
 def with_speaker_tag(text: str) -> str:
     """Prefix ``<|speaker:0|> `` unless the text already starts with a speaker tag."""
-    if _SPEAKER_TAG.match(text):
+    if _SPEAKER_TAG.match(text.lstrip(_WHITE_SPACE)):
         return text
     return f"<|speaker:0|> {text}"
 
 
 def _reference_transcript(transcript: str) -> str:
     """A reference transcript starts with its speaker tag, directly after "Text: "."""
-    match = _SPEAKER_TAG.match(transcript)
-    if match is None:
-        return f"<|speaker:0|> {transcript}"
-    return f"<|speaker:{match.group(1)}|>" + transcript[match.end() :]
+    tagged = with_speaker_tag(transcript)
+    body = tagged.lstrip(_WHITE_SPACE)
+    match = _SPEAKER_TAG.match(body)
+    assert match is not None
+    leading = tagged[: len(tagged) - len(body)]
+    return match.group(0) + leading + body[match.end() :]
 
 
 def _segments(text: str, references: list[Reference]) -> list[str | torch.Tensor]:
+    _validate_text(text, "text")
+    for index, reference in enumerate(references, 1):
+        _validate_text(reference.transcript, f"reference {index}")
     segments: list[str | torch.Tensor] = [
         "<|im_start|>system\n",
         REFERENCE_INSTRUCTION if references else TTS_INSTRUCTION,

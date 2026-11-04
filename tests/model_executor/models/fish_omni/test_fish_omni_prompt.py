@@ -113,8 +113,8 @@ def test_text_speaker_tag(text, expected):
     [
         ("Some words.", "Text: <|speaker:0|> Some words.\n"),
         ("<|speaker:2|> Some words.", "Text: <|speaker:2|> Some words.\n"),
-        # Leading white space before the tag is dropped: the tag follows "Text: ".
-        ("  <|speaker:2|> Some words.", "Text: <|speaker:2|> Some words.\n"),
+        # Leading white space moves behind the tag, matching the native builder.
+        ("  <|speaker:2|> Some words.", "Text: <|speaker:2|>   Some words.\n"),
     ],
 )
 def test_reference_transcript_speaker_tag(transcript, expected):

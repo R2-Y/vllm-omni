@@ -25,6 +25,7 @@ rows replay the backbone, tower and sampling as PIECEWISE graphs.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections.abc import Iterable
 from typing import Any
@@ -298,6 +299,7 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
         self._tokenizer = None
 
         from .sm120_experiment import install
+
         install(self)
 
     # ------------------------------------------------------------------
@@ -386,13 +388,21 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
             if not isinstance(transcript, str) or not transcript.strip():
                 raise ValueError("fish_omni voice cloning needs 'ref_text' with the reference audio")
             references.append(Reference(transcript, codes))
-        return build_prompt_frames(
+        frames = build_prompt_frames(
             self._get_tokenizer(),
             text,
             references,
             semantic_begin_id=self.semantic_begin_id,
             num_codebooks=self.num_codebooks,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[Drama3PromptAudit] rows=%s prompt_sha256=%s reference_code_sha256=%s",
+                tuple(frames.shape),
+                hashlib.sha256(frames.numpy().tobytes()).hexdigest(),
+                [hashlib.sha256(ref.codes.cpu().numpy().tobytes()).hexdigest() for ref in references],
+            )
+        return frames
 
     @staticmethod
     def estimate_prompt_len_from_additional_information(
@@ -598,6 +608,9 @@ class FishOmniForConditionalGeneration(nn.Module, HasInnerState, IsHybrid):
         # Load the reference-audio encoder now, so the first voice-clone request
         # does not pay for it.
         _load_dac_codec(self.model_path, device=self.lm_head.device, dtype=torch.float32)
+        from .attention_recovery import install_attention_recovery
+
+        install_attention_recovery(self)
         return loaded
 
     def _tower_param_name(self, name: str) -> tuple[str, str] | None:

@@ -96,6 +96,7 @@ class FishOmniConfig(PretrainedConfig):
         audio_pad_token_id: int = 248076,
         eos_token_id: int = 248046,
         speech_template_version: str = "reference-bracket-v1",
+        int4_attention_source: str | None = None,
         **kwargs: Any,
     ) -> None:
         if isinstance(text_config, dict):
@@ -108,6 +109,11 @@ class FishOmniConfig(PretrainedConfig):
         self.semantic_end_token_id = semantic_end_token_id
         self.audio_pad_token_id = audio_pad_token_id
         self.speech_template_version = speech_template_version
+        if int4_attention_source is not None and (
+            not isinstance(int4_attention_source, str) or not int4_attention_source.strip()
+        ):
+            raise ValueError("int4_attention_source must name the matching local original checkpoint")
+        self.int4_attention_source = int4_attention_source
         kwargs.pop("tie_word_embeddings", None)
         super().__init__(eos_token_id=eos_token_id, tie_word_embeddings=False, **kwargs)
 
