@@ -130,6 +130,41 @@ def test_inline_event_tags_pass_through():
     assert text in _decode(frames[:, 0])
 
 
+@pytest.mark.parametrize(
+    ("transcript", "cleaned"),
+    [
+        ("……山の木々が、きれいに色づいてきました。", "山の木々が、きれいに色づいてきました。"),
+        ("... Some words.", "Some words."),
+        ("⋯⋯Some words.", "Some words."),
+        ("\u3000…… … Some words.", "\u3000Some words."),
+        ("<|speaker:2|> ……Some words.", "<|speaker:2|> Some words."),
+        ("……<|speaker:2|> Some words.", "<|speaker:2|> Some words."),
+        ("  <|speaker:2|> ... Some words.", "  <|speaker:2|> Some words."),
+        ("……[sighs] Some words.", "[sighs] Some words."),
+        ("Some… words...", "Some… words..."),
+        ("「Some words!」 秋も、楽しい季節です。", "「Some words!」 秋も、楽しい季節です。"),
+        (".5 is less than 1.0.", ".5 is less than 1.0."),
+    ],
+)
+def test_reference_leading_ellipses_match_clean_prompt(transcript, cleaned):
+    codes = torch.tensor([[5, 1, 2], [7, 3, 4]])
+    text = "……Keep user punctuation... <|speaker:1|> [laughs] Yes!"
+    tokenizer = CharTokenizer()
+    frames = _build(tokenizer, text, [Reference(transcript, codes)])
+    expected = _build(CharTokenizer(), text, [Reference(cleaned, codes)])
+    assert torch.equal(frames, expected)
+    assert with_speaker_tag(text) in tokenizer.calls
+    assert prompt_length(CharTokenizer(), text, [transcript], [2]) == len(frames)
+
+
+@pytest.mark.parametrize("transcript", ["……", " ... \t", "<|speaker:2|> ⋯⋯"])
+def test_reference_empty_after_cleaning_is_rejected(transcript):
+    with pytest.raises(ValueError, match="reference transcript: text must not be empty"):
+        _build(CharTokenizer(), "Hi.", [Reference(transcript, torch.zeros((1, NUM_CODEBOOKS), dtype=torch.long))])
+    with pytest.raises(ValueError, match="reference transcript: text must not be empty"):
+        prompt_length(CharTokenizer(), "Hi.", [transcript], [1])
+
+
 @pytest.mark.parametrize("frame_counts", [[], [1], [37]])
 def test_prompt_length_matches_frames(frame_counts):
     text = "<|speaker:1|> The quarterly report is due on Thursday."

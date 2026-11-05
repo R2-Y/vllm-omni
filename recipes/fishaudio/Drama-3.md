@@ -82,6 +82,15 @@ curl -X POST http://localhost:8091/v1/audio/speech \
     }' --output cloned.wav
 ```
 
+#### Reference transcript normalization
+
+Reference transcripts remove leading ellipses (`……`, `⋯`, or three or more
+ASCII dots), including after an initial speaker tag. Sentence punctuation,
+inline event tags and the requested speech text are preserved. Supply a
+transcript matching the reference audio; this normalization does not guarantee
+that generated speech will be free of reference-text leakage. A transcript
+containing only ellipses is rejected.
+
 #### Pre-encoded reference
 
 A reference can be sent already encoded, as in the model card's production

@@ -4,6 +4,8 @@
 
 A frame row is ``[token id, code 0, ..., code Q-1]``. Text rows carry zero
 codes; a reference audio frame's token id is ``semantic_begin + code 0``.
+Reference transcripts drop leading ellipses; other punctuation, event tags
+and user text are preserved. Length estimation uses the same normalization.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ _SPEAKER_IDS = frozenset(str(speaker_id) for speaker_id in range(16))
 _STRUCTURAL_TOKENS = ("<|im_start|>", "<|im_end|>", "<|voice|>", "<|text|>", "<|interleave|>", "<|semantic:")
 # Match the native builder's Unicode White_Space set, excluding U+001C..U+001F.
 _WHITE_SPACE = "".join(map(chr, (*range(9, 14), 32, 133, 160, 5760, *range(8192, 8203), 8232, 8233, 8239, 8287, 12288)))
+_LEADING_REFERENCE_ELLIPSIS = re.compile(rf"\A([{_WHITE_SPACE}]*)(?:(?:[…⋯]|\.{{3,}})[{_WHITE_SPACE}]*)+")
 
 
 def _validate_text(text: str, location: str) -> None:
@@ -50,12 +53,17 @@ def with_speaker_tag(text: str) -> str:
 
 def _reference_transcript(transcript: str) -> str:
     """A reference transcript starts with its speaker tag, directly after "Text: "."""
+    # Only remove leading pause notation, not sentence punctuation or inline tags.
+    transcript = _LEADING_REFERENCE_ELLIPSIS.sub(r"\1", transcript)
     tagged = with_speaker_tag(transcript)
     body = tagged.lstrip(_WHITE_SPACE)
     match = _SPEAKER_TAG.match(body)
     assert match is not None
     leading = tagged[: len(tagged) - len(body)]
-    return match.group(0) + leading + body[match.end() :]
+    content = _LEADING_REFERENCE_ELLIPSIS.sub(r"\1", body[match.end() :])
+    if not content.strip(_WHITE_SPACE):
+        raise ValueError("reference transcript: text must not be empty after removing leading ellipses")
+    return match.group(0) + leading + content
 
 
 def _segments(text: str, references: list[Reference]) -> list[str | torch.Tensor]:
