@@ -21,9 +21,11 @@ detections with this reference. Complete-body screening passed three of five
 FP8 outputs and one of five INT4 outputs; neither Japanese newline case passed.
 The same-round 4.4-second first-sentence control passed three of five bodies
 on each model. These are small eager-mode screening sets, not a general
-reference-tail or speech-quality guarantee. Longest-sentence selection remains
-an offline experiment, not an automatic serving-path feature. The production
-change only normalizes leading reference ellipses and preserves user text.
+reference-tail or speech-quality guarantee. These measurements used offline
+reference preparation. The speech adapter now also implements automatic
+first-sentence preparation through CPU alignment and a bounded cache; those
+earlier measurements do not certify the new serving integration. User text and
+generated audio remain outside reference preprocessing.
 
 ## Confirmed implementation problems
 

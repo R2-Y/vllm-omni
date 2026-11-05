@@ -138,6 +138,46 @@ def test_prompt_beyond_the_model_limit_is_rejected():
         _build(_adapter(max_model_len=64), _request(ref_audio_codes=_codes(frames=80)))
 
 
+@pytest.mark.parametrize("voice", [None, "alice"])
+def test_raw_reference_is_selected_before_prompt_reservation_and_conditioning_cache(monkeypatch, voice):
+    from vllm_omni.model_executor.models.fish_omni.reference import ReferenceSentencePreprocessor, SentenceSpan
+    from vllm_omni.utils.speaker_cache import SpeakerEmbeddingCache
+
+    calls = []
+    cache = SpeakerEmbeddingCache(max_bytes=1024 * 1024)
+    monkeypatch.setattr("vllm_omni.utils.speaker_cache.get_speaker_cache", lambda: cache)
+
+    def align(self, waveform, rate, sentences):
+        calls.append(sentences)
+        return [SentenceSpan(0, 0.2), SentenceSpan(0.4, 0.9)]
+
+    monkeypatch.setattr(ReferenceSentencePreprocessor, "_align", align)
+    adapter = _adapter()
+    adapter.ctx.server.uploaded_speakers = {"alice": {}}
+    request = _request(ref_audio="data:audio/wav;base64,AAAA", ref_text="First. Second.", voice=voice)
+    prepared = _build(adapter, request)
+    info = prepared.prompt["additional_information"]
+    assert info["ref_text"] == "First."
+    assert info["text"] == request.input
+    assert request.ref_text == "First. Second."
+    assert info["ref_audio_wav"].numel() < 44100
+    assert "voice_name" not in info
+    assert prepared.tts_params["ref_audio_cache_key"] != "audio-key"
+    from vllm_omni.model_executor.models.fish_omni.fish_omni_model import FishOmniForConditionalGeneration
+
+    assert len(prepared.prompt["prompt_token_ids"]) == (
+        FishOmniForConditionalGeneration.estimate_prompt_len_from_additional_information(info, tokenizer=_Tokenizer())
+    )
+    again = _build(adapter, request)
+    assert prepared.prompt["cache_salt"] == again.prompt["cache_salt"]
+    assert len(calls) == 1
+
+
+def test_multi_sentence_codes_require_raw_audio_for_alignment():
+    with pytest.raises(ValueError, match="raw ref_audio"):
+        _build(_adapter(), _request(ref_audio_codes=_codes(), ref_text="First. Second."))
+
+
 def test_adapters_without_codes_support_reject_them():
     from vllm_omni.entrypoints.openai.tts_adapters.base import validate_tts_request
 

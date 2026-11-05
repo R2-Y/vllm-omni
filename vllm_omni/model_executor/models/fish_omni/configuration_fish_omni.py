@@ -97,6 +97,7 @@ class FishOmniConfig(PretrainedConfig):
         eos_token_id: int = 248046,
         speech_template_version: str = "reference-bracket-v1",
         int4_attention_source: str | None = None,
+        reference_alignment_model: str = "small",
         **kwargs: Any,
     ) -> None:
         if isinstance(text_config, dict):
@@ -114,6 +115,9 @@ class FishOmniConfig(PretrainedConfig):
         ):
             raise ValueError("int4_attention_source must name the matching local original checkpoint")
         self.int4_attention_source = int4_attention_source
+        if not isinstance(reference_alignment_model, str) or not reference_alignment_model.strip():
+            raise ValueError("reference_alignment_model must be a Whisper model name or local checkpoint path")
+        self.reference_alignment_model = reference_alignment_model
         kwargs.pop("tie_word_embeddings", None)
         super().__init__(eos_token_id=eos_token_id, tie_word_embeddings=False, **kwargs)
 

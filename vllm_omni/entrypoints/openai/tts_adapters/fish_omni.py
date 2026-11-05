@@ -25,6 +25,7 @@ from vllm_omni.entrypoints.openai.tts_adapters.base import (
 
 if TYPE_CHECKING:
     from vllm_omni.entrypoints.openai.protocol.audio import OpenAICreateSpeechRequest
+    from vllm_omni.model_executor.models.fish_omni.reference import ReferenceSentencePreprocessor
 
 
 @register_tts_adapter
@@ -36,6 +37,7 @@ class FishOmniAdapter(ARTTSAdapter):
     def __init__(self, ctx) -> None:
         super().__init__(ctx)
         self._tokenizer = None
+        self._reference_preprocessor: ReferenceSentencePreprocessor | None = None
         self._build_prompt_async = make_async(self._build_prompt, executor=getattr(ctx.server, "_tts_executor", None))
 
     def _get_tokenizer(self):
@@ -79,23 +81,41 @@ class FishOmniAdapter(ARTTSAdapter):
         ref_audio_data: tuple[list[float], int] | None,
         has_inline_ref_audio: bool,
         ref_codes: np.ndarray | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], str | None]:
         """Additional information for stage-0 preprocess, with a placeholder prompt
         sized to the exact prompt row count."""
         from vllm_omni.model_executor.models.fish_omni.fish_omni_model import FishOmniForConditionalGeneration
+        from vllm_omni.model_executor.models.fish_omni.prompt import _validate_text
 
+        _validate_text(request.input, "text")
         info: dict[str, Any] = {"text": request.input}
+        selection_key = None
         if ref_codes is not None:
+            from vllm_omni.model_executor.models.fish_omni.reference import reference_sentences
+
+            if not request.ref_text:
+                raise ValueError("ref_audio_codes require ref_text")
+            if len(reference_sentences(request.ref_text)[1]) > 1:
+                raise ValueError("multi-sentence ref_audio_codes need raw ref_audio for sentence alignment")
             info["ref_text"] = request.ref_text
             # The model takes reference codes as [frames, codebooks].
             info["ref_codes"] = torch.from_numpy(np.ascontiguousarray(ref_codes.T))
         elif ref_audio_data is not None and request.ref_text:
             wav_samples, sr = ref_audio_data
-            info["ref_text"] = request.ref_text
-            info["ref_audio_wav"] = torch.from_numpy(np.asarray(wav_samples, dtype=np.float32))
+            from vllm_omni.model_executor.models.fish_omni.reference import ReferenceSentencePreprocessor
+            from vllm_omni.utils.speaker_cache import get_speaker_cache
+
+            if self._reference_preprocessor is None:
+                model_name = getattr(self._model_config().hf_config, "reference_alignment_model", "small")
+                self._reference_preprocessor = ReferenceSentencePreprocessor(model_name, get_speaker_cache())
+            wav = np.asarray(wav_samples, dtype=np.float32)
+            selected = self._reference_preprocessor.prepare(wav, sr, request.ref_text)
+            info["ref_text"] = selected.transcript if selected is not None else request.ref_text
+            info["ref_audio_wav"] = torch.from_numpy(selected.waveform if selected is not None else wav)
             info["ref_audio_sr"] = int(sr)
+            selection_key = selected.cache_key if selected is not None else None
             server = self.ctx.server
-            if request.voice is not None:
+            if request.voice is not None and selected is None:
                 voice_lower = request.voice.lower()
                 if voice_lower in server.uploaded_speakers and not has_inline_ref_audio:
                     info["voice_name"] = voice_lower
@@ -108,7 +128,7 @@ class FishOmniAdapter(ARTTSAdapter):
             raise ValueError(f"the prompt is {prompt_len} rows; the model's limit is {max_model_len - 1}")
         prompt = tokens_input(prompt_token_ids=[1] * prompt_len)
         prompt["additional_information"] = info
-        return prompt
+        return prompt, selection_key
 
     def validate(self, request: "OpenAICreateSpeechRequest") -> str | None:
         server = self.ctx.server
@@ -148,9 +168,13 @@ class FishOmniAdapter(ARTTSAdapter):
             ref_audio_data = (wav_list, sr)
             tts_params["ref_audio_cache_key"] = cache_key
         try:
-            prompt = await self._build_prompt_async(request, ref_audio_data, has_inline_ref_audio, ref_codes)
+            prompt, selection_key = await self._build_prompt_async(
+                request, ref_audio_data, has_inline_ref_audio, ref_codes
+            )
         except ValueError as exc:
             raise ValueError(f"Drama 3 request: {exc}") from exc
+        if selection_key is not None:
+            tts_params["ref_audio_cache_key"] = selection_key
         prompt["cache_salt"] = conditioning_cache_salt(request, tts_params)
         return PreparedRequest(prompt=prompt, tts_params=tts_params, model_type="fish_omni")
 

@@ -58,6 +58,25 @@ sufficient; an override MUST document the behavioral difference.
 Test registration, checkpoint loading, input conversion, and representative
 model execution. Test shared utilities against more than one integration.
 
+## Reference preparation
+
+### Drama 3
+
+The Drama 3 speech adapter owns first-sentence selection for raw reference
+audio. In the TTS worker executor, it uses supplied-text alignment to associate
+sentences with speech, and blind ASR word timestamps to determine crop edges.
+It retains the supplied text, crops audio and text together, then estimates prompt rows and sends
+the prepared pair to Stage 0. The bounded speaker cache keys preparation by
+audio content, transcript and alignment checkpoint. Selected references use
+content-based codec caching, rather than an uploaded voice's whole-clip key.
+User text and generated audio are outside this preprocessing boundary.
+
+Single-sentence references bypass alignment. Pre-encoded references must
+already describe a single sentence because codec codes have no sentence
+timestamps. Alignment failure is reported instead of guessing a duration
+from text length. See the [Drama 3 recipe](../../../recipes/fishaudio/Drama-3.md)
+for dependencies, checkpoint configuration and reference limits.
+
 ## Platform-specific model adapters
 
 Drama 3's Ascend attention compatibility, hybrid model state, and FP8 expert

@@ -34,6 +34,10 @@ classifiers = [
 
 [project.optional-dependencies]
 
+fish-reference = [
+    "openai-whisper==20250625",
+]
+
 ming-tn = [
     "pynini",
     "inflect",

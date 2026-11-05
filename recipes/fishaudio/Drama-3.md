@@ -91,12 +91,58 @@ transcript matching the reference audio; this normalization does not guarantee
 that generated speech will be free of reference-text leakage. A transcript
 containing only ellipses is rejected.
 
+#### First complete reference sentence
+
+For raw `ref_audio` with multiple sentences in `ref_text`, the Drama 3 speech
+adapter now selects the first sentence and crops both inputs
+together, before reserving prompt rows or encoding the reference. Selection
+follows transcript order, even when a later sentence is longer. Up to
+0.25 seconds of existing audio is retained on each side, bounded by adjacent
+sentence midpoints. The requested `input` and generated audio are unchanged.
+
+Install the reference alignment dependency on the serving host:
+
+```bash
+uv pip install -e '.[fish-reference]'
+```
+
+The first distinct multi-sentence reference is processed on CPU with Whisper.
+Supplied-text alignment associates sentences with speech; blind ASR word
+timestamps (beam size 5) determine the crop edges before adding the margin.
+The original reference text is retained, including when ASR spells a word
+differently. Ambiguous or missing word-to-sentence matches are rejected.
+The default alignment checkpoint is `small`, downloaded by Whisper
+on first use if absent. For offline serving, supply a preinstalled checkpoint
+with `--hf-overrides '{"reference_alignment_model":"/models/whisper/small.pt"}'`
+(or the equivalent Stage 0 `engine_extras.hf_overrides` entry).
+Use a checkpoint supporting the reference's language; reference language is
+detected from its audio, independently of the target speech language.
+
+Selected audio/text pairs use the bounded speaker LRU
+(`speech_cache.speaker_max_bytes`); repeated references avoid alignment.
+Changing audio, transcript or alignment checkpoint changes the cache key.
+The CPU aligner remains loaded for the adapter's lifetime. Single-sentence
+references skip alignment and do not require Whisper. This preprocessing adds
+latency on a cache miss, not a claim of zero first-request overhead.
+
+Automatic selection accepts at most 30 seconds of mono reference audio and
+complete, plainly punctuated, single-speaker transcripts. Sentence boundaries
+use `。！？!?` or sentence-final `.`, retaining closing quotes and avoiding
+decimal points and common English title abbreviations. Multi-sentence
+references containing inline event/speaker changes, incomplete trailing text,
+or invalid alignment boundaries are rejected rather than cut proportionally.
+The reference transcript must match the audio; alignment is approximate and
+does not certify speech quality or eliminate every reference continuation.
+
 #### Pre-encoded reference
 
 A reference can be sent already encoded, as in the model card's production
 serving setup: `ref_audio_codes` holds `[codebooks, frames]` raw codebook
 indices of the checkpoint's codec (`codec.pth`), with `ref_text`. Nothing is
-fetched or encoded per request; the prompt is the same as for the audio.
+fetched or encoded per request. Supply codes for an already selected single
+sentence and its matching `ref_text`. Multi-sentence `ref_audio_codes` requests
+must instead supply raw `ref_audio`, since codes alone do not carry sentence
+timestamps. They are rejected rather than sliced by text-length ratios.
 
 ```bash
 curl -X POST http://localhost:8091/v1/audio/speech \
